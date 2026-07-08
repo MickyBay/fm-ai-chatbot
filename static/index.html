@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FileMaker AI Chatbot</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <!-- ===================== SETUP WIZARD (shown when no profile exists) ===================== -->
+  <div id="wizard" class="wizard-overlay hidden">
+    <div class="wizard-card">
+
+      <div class="wizard-steps">
+        <span class="step active" data-step="1">1. Credentials</span>
+        <span class="step" data-step="2">2. Database</span>
+        <span class="step" data-step="3">3. Layout</span>
+        <span class="step" data-step="4">4. Confirm</span>
+      </div>
+
+      <!-- Step 1: credentials only -->
+      <section class="wizard-step" id="step1">
+        <h2>Connect to your FileMaker Server</h2>
+        <p class="hint">Enter just the server and login details — you'll pick the database and layout in the next steps.</p>
+        <input id="wServer" placeholder="Server URL (https://your-server.com)" />
+        <input id="wUsername" placeholder="Username" />
+        <input id="wPassword" type="password" placeholder="Password" />
+        <label class="checkbox-row"><input type="checkbox" id="wVerifySsl" /> Verify SSL certificate</label>
+        <p class="hint" style="margin-top:-8px; font-size:12px;">Leave unchecked if your FileMaker server uses a self-signed certificate (most on-premise servers do).</p>
+        <div id="step1Error" class="error hidden"></div>
+        <button id="toStep2Btn" class="btn-primary">Connect &amp; Fetch Databases</button>
+        <button id="useSavedCredsBtn" class="btn-secondary hidden" style="width:100%; margin-top:8px;">Use saved login</button>
+      </section>
+
+      <!-- Step 2: pick database(s) -->
+      <section class="wizard-step hidden" id="step2">
+        <h2>Select Database(s)</h2>
+        <p class="hint">These are the databases available on this server. Pick one to continue, or tick several - you'll set up a layout for each, one at a time.</p>
+        <input id="databaseSearch" class="search-box" placeholder="Search databases..." />
+        <div id="databaseList" class="option-list"></div>
+        <div id="step2Error" class="error hidden"></div>
+        <button class="btn-secondary" data-back="1">&larr; Back</button>
+        <button id="refreshInWizardBtn" class="btn-secondary">&#8635; Refresh</button>
+      </section>
+
+      <!-- Step 3: pick layout -->
+      <section class="wizard-step hidden" id="step3">
+        <h2>Select a Layout</h2>
+        <p class="hint">The Data API only reads from layouts, not tables directly — choose a layout that contains just the fields you need.</p>
+        <input id="layoutSearch" class="search-box" placeholder="Search layouts..." />
+        <div id="layoutList" class="option-list"></div>
+        <div id="step3Error" class="error hidden"></div>
+        <button class="btn-secondary" data-back="2">&larr; Back</button>
+      </section>
+
+      <!-- Step 4: schema preview + save -->
+      <section class="wizard-step hidden" id="step4">
+        <h2>Data Preview</h2>
+        <p class="hint">These are the fields and related tables on this layout — the chatbot will answer questions based on these.</p>
+        <div id="schemaPreview" class="schema-preview"></div>
+        <input id="wProfileKey" placeholder="Profile key (e.g. sales_db)" />
+        <input id="wProfileName" placeholder="Display name (e.g. Sales Database)" />
+        <div id="step4Error" class="error hidden"></div>
+        <button class="btn-secondary" data-back="3">&larr; Back</button>
+        <button id="saveProfileBtn" class="btn-primary">Save &amp; Start Chatting</button>
+      </section>
+
+    </div>
+  </div>
+
+  <!-- ===================== MAIN APP ===================== -->
+  <div class="app-shell">
+
+    <aside class="sidebar">
+      <h2>Project</h2>
+      <select id="projectSelect"></select>
+      <button id="addProjectBtn" class="btn-secondary">+ New Project</button>
+      <button id="deleteProjectBtn" class="btn-secondary danger">Delete Project</button>
+
+      <h2 class="section-gap">Active Databases</h2>
+      <p class="hint sidebar-hint">Tick one or more to query at once.</p>
+      <div id="profileCheckList" class="profile-check-list"></div>
+      <button id="refreshDatabasesBtn" class="btn-secondary">&#8635; Refresh List</button>
+      <button id="addProfileBtn" class="btn-secondary">+ Add New Database</button>
+      <button id="deleteProfileBtn" class="btn-secondary danger">Remove Selected</button>
+    </aside>
+
+    <main class="chat-main">
+      <header class="chat-header">
+        <div>
+          <h1>FileMaker AI Assistant</h1>
+          <span id="activeProfileLabel" class="subtitle">No profile selected</span>
+        </div>
+        <span id="quotaBadge" class="badge">-- / -- today</span>
+      </header>
+
+      <div id="messages" class="messages"></div>
+
+      <form id="chatForm" class="chat-input-row">
+        <input id="chatInput" type="text" placeholder="Ask about your data, e.g. 'what data is here?'" autocomplete="off" />
+        <button type="submit" class="btn-primary">Send</button>
+      </form>
+    </main>
+
+  </div>
+
+  <script src="chat.js"></script>
+</body>
+</html>

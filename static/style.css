@@ -1,0 +1,290 @@
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  background: #f0f6ff;
+  color: #1a2b45;
+}
+
+.hidden { display: none !important; }
+
+/* ---------------- Wizard ---------------- */
+.wizard-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(13, 71, 161, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+
+.wizard-card {
+  background: #ffffff;
+  width: 480px;
+  max-width: 92vw;
+  max-height: 88vh;
+  overflow-y: auto;
+  border-radius: 14px;
+  padding: 28px;
+  box-shadow: 0 20px 60px rgba(13, 71, 161, 0.25);
+  border: 1px solid #e3edfc;
+}
+
+.wizard-steps {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 20px;
+  font-size: 12px;
+  color: #a7c1e8;
+}
+
+.wizard-steps .step.active { color: #0d47a1; font-weight: 700; }
+
+.wizard-step h2 { margin: 0 0 6px; font-size: 18px; color: #0d47a1; }
+.hint { font-size: 13px; color: #6b84a8; margin: 0 0 16px; }
+
+.wizard-step input {
+  width: 100%;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+  border-radius: 6px;
+  border: 1px solid #c9dcf5;
+  background: #f7fafe;
+  font-size: 14px;
+  color: #1a2b45;
+}
+
+.wizard-step input:focus {
+  outline: none;
+  border-color: #1e88e5;
+  background: #ffffff;
+}
+
+.checkbox-row { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #4c6584; margin-bottom: 14px; }
+.checkbox-row input { width: auto; margin: 0; }
+
+.option-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 16px; max-height: 260px; overflow-y: auto; }
+
+.search-box {
+  width: 100%;
+  padding: 9px 12px;
+  margin-bottom: 10px;
+  border-radius: 6px;
+  border: 1px solid #c9dcf5;
+  background: #f7fafe;
+  font-size: 14px;
+  color: #1a2b45;
+}
+.search-box:focus { outline: none; border-color: #1e88e5; background: #ffffff; }
+
+.option-item {
+  padding: 10px 14px;
+  border: 1px solid #dbe9fb;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 14px;
+  background: #ffffff;
+  color: #1a2b45;
+}
+
+.option-item:hover { border-color: #1e88e5; background: #eaf3ff; }
+
+.option-item-checkbox { display: flex; align-items: center; gap: 10px; }
+.option-item-checkbox input { width: auto; margin: 0; }
+
+#refreshInWizardBtn { margin-top: 4px; }
+
+/* ---------------- Sidebar multi-select database list ---------------- */
+.sidebar-hint { color: #a7c1e8 !important; margin-bottom: 8px !important; }
+
+.profile-check-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 6px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.profile-check-item {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  column-gap: 8px;
+  align-items: center;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid #2f68b8;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.profile-check-item:hover { background: rgba(255, 255, 255, 0.12); }
+.profile-check-item input { grid-row: span 3; width: auto; margin: 0; align-self: start; margin-top: 2px; }
+.profile-check-item span { color: #ffffff; font-weight: 600; }
+.profile-check-item small { color: #a7c1e8; font-size: 11px; }
+
+.change-layout-btn {
+  grid-column: 2;
+  justify-self: start;
+  margin-top: 4px;
+  background: transparent;
+  border: none;
+  color: #ffd166;
+  font-size: 11px;
+  font-weight: 600;
+  text-decoration: underline;
+  cursor: pointer;
+  padding: 0;
+}
+.change-layout-btn:hover { color: #ffe08a; }
+
+
+.schema-preview {
+  background: #f0f6ff;
+  border: 1px solid #dbe9fb;
+  border-radius: 8px;
+  padding: 12px 14px;
+  font-size: 13px;
+  margin-bottom: 14px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.schema-preview h4 { margin: 0 0 6px; font-size: 13px; color: #0d47a1; }
+.schema-preview ul { margin: 0 0 10px; padding-left: 18px; color: #33455e; }
+
+.error {
+  background: #fdecec;
+  color: #b3261e;
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  margin-bottom: 12px;
+}
+
+.btn-primary, .btn-secondary {
+  padding: 10px 16px;
+  border-radius: 6px;
+  border: none;
+  font-weight: 600;
+  cursor: pointer;
+  font-size: 14px;
+  margin-top: 4px;
+}
+
+.btn-primary { background: #1e88e5; color: #ffffff; width: 100%; }
+.btn-primary:hover { background: #1565c0; }
+
+.btn-secondary { background: #eaf3ff; color: #0d47a1; margin-right: 8px; }
+.btn-secondary:hover { background: #d7e9ff; }
+.btn-secondary.danger { background: #fdecec; color: #b3261e; }
+
+/* ---------------- Main app ---------------- */
+.app-shell { display: flex; height: 100vh; }
+
+.sidebar {
+  width: 280px;
+  background: #0d47a1;
+  color: #ffffff;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.sidebar h2 {
+  font-size: 15px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #a7c1e8;
+  margin-bottom: 4px;
+}
+
+.sidebar h2.section-gap { margin-top: 18px; }
+
+.sidebar select {
+  width: 100%;
+  padding: 9px 10px;
+  border-radius: 6px;
+  border: 1px solid #2f68b8;
+  background: #12539c;
+  color: #ffffff;
+  font-size: 14px;
+}
+
+.sidebar .btn-secondary { background: transparent; border: 1px solid #3f77c4; color: #ffffff; margin: 0; }
+.sidebar .btn-secondary:hover { background: #12539c; }
+.sidebar .btn-secondary.danger { border-color: #8a3a3a; color: #ffb3b3; }
+
+.chat-main { flex: 1; display: flex; flex-direction: column; background: #ffffff; }
+
+.chat-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 24px;
+  background: #ffffff;
+  border-bottom: 1px solid #dbe9fb;
+}
+
+.chat-header h1 { font-size: 18px; margin: 0; color: #0d47a1; }
+.subtitle { font-size: 13px; color: #6b84a8; }
+
+.badge {
+  background: #eaf3ff;
+  color: #0d47a1;
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.messages { flex: 1; overflow-y: auto; padding: 24px; display: flex; flex-direction: column; gap: 14px; background: #f0f6ff; }
+
+.msg { max-width: 65%; padding: 10px 14px; border-radius: 12px; font-size: 14px; line-height: 1.4; }
+.msg.user { align-self: flex-end; background: #1e88e5; color: #ffffff; border-bottom-right-radius: 2px; }
+.msg.bot { align-self: flex-start; background: #ffffff; border: 1px solid #dbe9fb; color: #1a2b45; border-bottom-left-radius: 2px; }
+
+.msg table { border-collapse: collapse; margin-top: 6px; width: 100%; }
+.msg th, .msg td { border: 1px solid #dbe9fb; padding: 4px 8px; font-size: 13px; text-align: left; }
+.msg th { background: #eaf3ff; color: #0d47a1; }
+
+.chat-input-row {
+  display: flex;
+  align-items: stretch;
+  gap: 10px;
+  padding: 16px 24px;
+  background: #ffffff;
+  border-top: 1px solid #dbe9fb;
+}
+
+.chat-input-row input {
+  flex: 1;
+  background: #f7fafe;
+  color: #1a2b45;
+  border: 1px solid #c9dcf5;
+  border-radius: 6px;
+  padding: 10px 12px;
+}
+
+.chat-input-row input:focus {
+  outline: none;
+  border-color: #1e88e5;
+  background: #ffffff;
+}
+
+/* FIX: the Send button reused the wizard's ".btn-primary" style, which
+   is width:100% - inside the chat row that stretched it to fill all
+   remaining space, squeezing the message input. This makes Send a
+   small, fixed-size rectangular button instead, so the input field
+   gets to be the bigger element in the row. */
+.chat-input-row .btn-primary {
+  width: auto;
+  flex: 0 0 auto;
+  padding: 10px 28px;
+  border-radius: 6px;
+  white-space: nowrap;
+}

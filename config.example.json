@@ -1,0 +1,15 @@
+{
+  "credentials": {
+    "server_url": "https://your-server.com",
+    "username": "YOUR_USERNAME",
+    "password": "YOUR_PASSWORD",
+    "verify_ssl": false
+  },
+  "active_profiles": [],
+  "profiles": {},
+  "gemini": {
+    "api_key": "YOUR_GEMINI_API_KEY",
+    "model": "gemini-2.5-flash",
+    "daily_request_limit": 20
+  }
+}
