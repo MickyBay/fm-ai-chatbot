@@ -15,14 +15,13 @@
       <div class="wizard-steps">
         <span class="step active" data-step="1">1. Credentials</span>
         <span class="step" data-step="2">2. Database</span>
-        <span class="step" data-step="3">3. Layout</span>
-        <span class="step" data-step="4">4. Confirm</span>
+        <span class="step" data-step="3">3. Confirm</span>
       </div>
 
       <!-- Step 1: credentials only -->
       <section class="wizard-step" id="step1">
         <h2>Connect to your FileMaker Server</h2>
-        <p class="hint">Enter just the server and login details — you'll pick the database and layout in the next steps.</p>
+        <p class="hint">Enter just the server and login details — you'll pick the database in the next step.</p>
         <input id="wServer" placeholder="Server URL (https://your-server.com)" />
         <input id="wUsername" placeholder="Username" />
         <input id="wPassword" type="password" placeholder="Password" />
@@ -36,7 +35,7 @@
       <!-- Step 2: pick database(s) -->
       <section class="wizard-step hidden" id="step2">
         <h2>Select Database(s)</h2>
-        <p class="hint">These are the databases available on this server. Pick one to continue, or tick several - you'll set up a layout for each, one at a time.</p>
+        <p class="hint">These are the databases available on this server. Pick one to continue, or tick several.</p>
         <input id="databaseSearch" class="search-box" placeholder="Search databases..." />
         <div id="databaseList" class="option-list"></div>
         <div id="step2Error" class="error hidden"></div>
@@ -44,25 +43,14 @@
         <button id="refreshInWizardBtn" class="btn-secondary">&#8635; Refresh</button>
       </section>
 
-      <!-- Step 3: pick layout -->
+      <!-- Step 3: name it + save -->
       <section class="wizard-step hidden" id="step3">
-        <h2>Select a Layout</h2>
-        <p class="hint">The Data API only reads from layouts, not tables directly — choose a layout that contains just the fields you need.</p>
-        <input id="layoutSearch" class="search-box" placeholder="Search layouts..." />
-        <div id="layoutList" class="option-list"></div>
-        <div id="step3Error" class="error hidden"></div>
-        <button class="btn-secondary" data-back="2">&larr; Back</button>
-      </section>
-
-      <!-- Step 4: schema preview + save -->
-      <section class="wizard-step hidden" id="step4">
-        <h2>Data Preview</h2>
-        <p class="hint">These are the fields and related tables on this layout — the chatbot will answer questions based on these.</p>
-        <div id="schemaPreview" class="schema-preview"></div>
+        <h2>Name This Database</h2>
+        <p class="hint">The assistant will figure out where to find your data automatically - no need to pick anything else.</p>
         <input id="wProfileKey" placeholder="Profile key (e.g. sales_db)" />
         <input id="wProfileName" placeholder="Display name (e.g. Sales Database)" />
-        <div id="step4Error" class="error hidden"></div>
-        <button class="btn-secondary" data-back="3">&larr; Back</button>
+        <div id="step3Error" class="error hidden"></div>
+        <button class="btn-secondary" data-back="2">&larr; Back</button>
         <button id="saveProfileBtn" class="btn-primary">Save &amp; Start Chatting</button>
       </section>
 
@@ -92,7 +80,10 @@
           <h1>FileMaker AI Assistant</h1>
           <span id="activeProfileLabel" class="subtitle">No profile selected</span>
         </div>
-        <span id="quotaBadge" class="badge">-- / -- today</span>
+        <div style="display: flex; align-items: center; gap: 12px;">
+          <button id="clearChatBtn" class="btn-secondary" style="margin: 0; padding: 6px 12px; font-size: 12px;">Clear Chat</button>
+          <span id="quotaBadge" class="badge">-- / -- today</span>
+        </div>
       </header>
 
       <div id="messages" class="messages"></div>

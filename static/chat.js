@@ -49,17 +49,7 @@ function clearError(stepId) {
 }
 
 document.querySelectorAll("[data-back]").forEach((btn) => {
-  btn.addEventListener("click", () => {
-    // In "Change Layout" edit mode, Step 2 was skipped entirely (we
-    // already know the database) - so Back from Step 3 should just
-    // cancel the edit and close the wizard, not jump to an empty Step 2.
-    if (wizardState.editing && btn.dataset.back === "2") {
-      wizardState.editing = null;
-      el("wizard").classList.add("hidden");
-      return;
-    }
-    showStep(btn.dataset.back);
-  });
+  btn.addEventListener("click", () => showStep(btn.dataset.back));
 });
 
 // ---------------------------------------------------------------------
@@ -262,191 +252,34 @@ function startNextDatabaseInQueue() {
   selectDatabase(dbName);
 }
 
-async function selectDatabase(dbName) {
-  clearError("step2Error");
+// Picking a database now goes straight to naming it - the AI figures out
+// which layout to use on its own, per question, so the end user never
+// has to see or choose FileMaker layout names.
+function selectDatabase(dbName) {
+  clearError("step3Error");
   wizardState.database = dbName;
 
-  try {
-    const res = await fetch(`${API_BASE}/api/discover/layouts`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        server_url: wizardState.server_url,
-        username: wizardState.username,
-        password: wizardState.password,
-        verify_ssl: wizardState.verify_ssl,
-        database: wizardState.database,
-      }),
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      showError("step2Error", err.detail || `Could not fetch layouts (${res.status}).`);
-      return;
-    }
-    const data = await res.json();
-    renderLayoutList(data.layouts);
-    showStep(3);
-  } catch (e) {
-    showError("step2Error", "An error occurred while fetching layouts.");
+  if (wizardState.editing) {
+    el("wProfileKey").value = wizardState.editing.key;
+    el("wProfileName").value = wizardState.editing.name;
+  } else {
+    el("wProfileKey").value = dbName.toLowerCase().replace(/\s+/g, "_");
+    el("wProfileName").value = dbName;
   }
-}
-
-// ---------------------------------------------------------------------
-// "Change Layout" shortcut: jumps straight to Step 3 (layout list) for
-// an EXISTING profile's database, reusing its already-saved credentials.
-// No need to re-enter server/username/password or re-pick the database -
-// this only fixes a wrong layout choice, in one click.
-// ---------------------------------------------------------------------
-
-async function startEditLayout(profileKey, profile) {
-  wizardState.server_url = profile.server_url;
-  wizardState.username = profile.username;
-  wizardState.password = ""; // blank -> backend reuses the saved shared credentials
-  wizardState.verify_ssl = profile.verify_ssl || false;
-  wizardState.database = profile.database;
-  wizardState.dbQueue = [];
-  wizardState.editing = { key: profileKey, name: profile.profile_name };
-
-  el("wizard").classList.remove("hidden");
-  clearError("step3Error");
-  el("layoutList").innerHTML = "<em>Loading layouts...</em>";
   showStep(3);
-
-  try {
-    const res = await fetch(`${API_BASE}/api/discover/layouts`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        server_url: wizardState.server_url,
-        username: wizardState.username,
-        password: wizardState.password,
-        verify_ssl: wizardState.verify_ssl,
-        database: wizardState.database,
-      }),
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      showError("step3Error", err.detail || `Could not fetch layouts (${res.status}).`);
-      return;
-    }
-    const data = await res.json();
-    renderLayoutList(data.layouts);
-  } catch (e) {
-    showError("step3Error", "An error occurred while fetching layouts.");
-  }
-}
-
-let allLayouts = [];
-let currentFilteredLayouts = [];
-
-function renderLayoutList(layouts) {
-  allLayouts = layouts;
-  applyLayoutFilter("");
-  const search = el("layoutSearch");
-  if (search) {
-    search.value = "";
-    search.oninput = () => applyLayoutFilter(search.value);
-    search.onkeydown = (e) => {
-      if (e.key === "Enter" && currentFilteredLayouts.length > 0) {
-        e.preventDefault();
-        selectLayout(currentFilteredLayouts[0]);
-      }
-    };
-  }
-}
-
-function applyLayoutFilter(filterText) {
-  const list = el("layoutList");
-  list.innerHTML = "";
-  const filtered = allLayouts.filter((layout) =>
-    layout.toLowerCase().includes(filterText.trim().toLowerCase())
-  );
-  currentFilteredLayouts = filtered;
-  if (!filtered.length) {
-    list.innerHTML = "<em>No matching layouts.</em>";
-    return;
-  }
-  filtered.forEach((layout) => {
-    const item = document.createElement("div");
-    item.className = "option-item";
-    item.textContent = layout;
-    item.addEventListener("click", () => selectLayout(layout));
-    list.appendChild(item);
-  });
 }
 
 // ---------------------------------------------------------------------
-// Step 3 -> 4: pick layout -> fetch schema preview
-// ---------------------------------------------------------------------
-
-async function selectLayout(layoutName) {
-  clearError("step3Error");
-  wizardState.layout = layoutName;
-
-  try {
-    const res = await fetch(`${API_BASE}/api/discover/schema`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        server_url: wizardState.server_url,
-        username: wizardState.username,
-        password: wizardState.password,
-        verify_ssl: wizardState.verify_ssl,
-        database: wizardState.database,
-        layout: wizardState.layout,
-      }),
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      showError("step3Error", err.detail || `Could not fetch schema (${res.status}).`);
-      return;
-    }
-    const schema = await res.json();
-    wizardState.schema = schema;
-    renderSchemaPreview(schema);
-    if (wizardState.editing) {
-      // Editing an existing profile - keep its original key/name so Save
-      // overwrites it instead of creating a duplicate entry.
-      el("wProfileKey").value = wizardState.editing.key;
-      el("wProfileName").value = wizardState.editing.name;
-    } else {
-      el("wProfileKey").value = wizardState.database.toLowerCase().replace(/\s+/g, "_");
-      el("wProfileName").value = wizardState.database;
-    }
-    showStep(4);
-  } catch (e) {
-    showError("step3Error", "An error occurred while fetching the schema.");
-  }
-}
-
-function renderSchemaPreview(schema) {
-  const box = el("schemaPreview");
-  const fieldsHtml = schema.fields.length
-    ? `<ul>${schema.fields.map((f) => `<li>${f}</li>`).join("")}</ul>`
-    : "<em>No fields found.</em>";
-  const tablesHtml = schema.related_tables.length
-    ? `<ul>${schema.related_tables.map((t) => `<li>${t}</li>`).join("")}</ul>`
-    : "<em>No related tables (portals) on this layout.</em>";
-
-  box.innerHTML = `
-    <h4>Fields (${schema.fields.length})</h4>
-    ${fieldsHtml}
-    <h4>Related Tables (${schema.related_tables.length})</h4>
-    ${tablesHtml}
-  `;
-}
-
-// ---------------------------------------------------------------------
-// Step 4: save profile, then move on to the next queued database (if any)
+// Step 3: save profile, then move on to the next queued database (if any)
 // ---------------------------------------------------------------------
 
 el("saveProfileBtn").addEventListener("click", async () => {
-  clearError("step4Error");
+  clearError("step3Error");
   const profileKey = el("wProfileKey").value.trim();
   const profileName = el("wProfileName").value.trim();
 
   if (!profileKey || !profileName) {
-    showError("step4Error", "Both a profile key and a display name are required.");
+    showError("step3Error", "Both a profile key and a display name are required.");
     return;
   }
 
@@ -460,14 +293,13 @@ el("saveProfileBtn").addEventListener("click", async () => {
         password: wizardState.password,
         verify_ssl: wizardState.verify_ssl,
         database: wizardState.database,
-        layout: wizardState.layout,
         profile_key: profileKey,
         profile_name: profileName,
       }),
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
-      showError("step4Error", err.detail || `Could not save profile (${res.status}).`);
+      showError("step3Error", err.detail || `Could not save profile (${res.status}).`);
       return;
     }
     // Move on to the next ticked database, if this was a multi-select.
@@ -481,7 +313,7 @@ el("saveProfileBtn").addEventListener("click", async () => {
       await loadProfiles();
     }
   } catch (e) {
-    showError("step4Error", "An error occurred while saving.");
+    showError("step3Error", "An error occurred while saving.");
   }
 });
 
@@ -589,18 +421,14 @@ async function loadProfiles() {
     label.innerHTML = `
       <input type="checkbox" value="${key}" ${activeKeys.has(key) ? "checked" : ""} />
       <span>${profile.profile_name || key}</span>
-      <small>${profile.database} &rarr; ${profile.layout}</small>
-      <button type="button" class="change-layout-btn" data-key="${key}">Change Layout</button>
+      <small>${profile.database}</small>
     `;
     label.querySelector("input").addEventListener("change", onActiveDatabasesChanged);
-    label.querySelector(".change-layout-btn").addEventListener("click", (e) => {
-      e.preventDefault();
-      startEditLayout(key, profile);
-    });
     listBox.appendChild(label);
   });
 
   updateActiveProfileLabel(data.profiles, Array.from(activeKeys));
+  loadSavedChat();
 }
 
 function updateActiveProfileLabel(profiles, activeKeys) {
@@ -718,6 +546,7 @@ function updateQuotaBadge() {
 async function sendMessage(message) {
   appendMessage(message, "user");
   conversationHistory.push({ role: "user", text: message });
+  saveCurrentChat();
 
   try {
     const res = await fetch(`${API_BASE}/api/chat`, {
@@ -753,6 +582,7 @@ async function sendMessage(message) {
     const answer = data.data;
     appendMessage(formatBotText(answer), "bot");
     conversationHistory.push({ role: "bot", text: answer });
+    saveCurrentChat();
   } catch (err) {
     appendMessage("Something went wrong reaching the server. (network/parse error)", "bot");
   }
@@ -767,6 +597,74 @@ el("chatForm").addEventListener("submit", (e) => {
   sendMessage(message);
 });
 
-updateQuotaBadge();
-loadProjects();
-loadProfiles();
+// Load saved chat history from localStorage
+function loadSavedChat() {
+  const select = el("projectSelect");
+  if (!select) return;
+  const projectKey = select.value;
+  if (!projectKey) return;
+
+  const checkedProfiles = Array.from(
+    el("profileCheckList").querySelectorAll("input[type=checkbox]:checked")
+  ).map((c) => c.value);
+
+  const key = `fm_chat_history_${projectKey}_${checkedProfiles.sort().join('_')}`;
+  const saved = localStorage.getItem(key);
+
+  el("messages").innerHTML = "";
+  conversationHistory = [];
+
+  if (saved) {
+    try {
+      conversationHistory = JSON.parse(saved);
+      conversationHistory.forEach((msg) => {
+        appendMessage(formatBotText(msg.text), msg.role === "bot" ? "bot" : "user");
+      });
+    } catch (e) {
+      console.error("Error parsing saved chat history:", e);
+      conversationHistory = [];
+    }
+  }
+}
+
+// Save current chat history to localStorage
+function saveCurrentChat() {
+  const select = el("projectSelect");
+  if (!select) return;
+  const projectKey = select.value;
+  if (!projectKey) return;
+
+  const checkedProfiles = Array.from(
+    el("profileCheckList").querySelectorAll("input[type=checkbox]:checked")
+  ).map((c) => c.value);
+
+  const key = `fm_chat_history_${projectKey}_${checkedProfiles.sort().join('_')}`;
+  localStorage.setItem(key, JSON.stringify(conversationHistory));
+}
+
+// Clear chat history
+el("clearChatBtn").addEventListener("click", () => {
+  if (!confirm("Are you sure you want to clear the chat history for this session?")) return;
+  const select = el("projectSelect");
+  if (!select) return;
+  const projectKey = select.value;
+  if (!projectKey) return;
+
+  const checkedProfiles = Array.from(
+    el("profileCheckList").querySelectorAll("input[type=checkbox]:checked")
+  ).map((c) => c.value);
+
+  const key = `fm_chat_history_${projectKey}_${checkedProfiles.sort().join('_')}`;
+  localStorage.removeItem(key);
+
+  el("messages").innerHTML = "";
+  conversationHistory = [];
+});
+
+// Run sequential initialization so elements like projectSelect are fully loaded
+async function init() {
+  updateQuotaBadge();
+  await loadProjects();
+  await loadProfiles();
+}
+init();

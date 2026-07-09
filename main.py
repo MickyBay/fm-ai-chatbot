@@ -4,16 +4,12 @@ fm-ai-chatbot backend
 Flow:
   1. User enters server_url + username + password only.
   2. Backend calls FileMaker Data API to list available DATABASES.
-  3. User picks a database -> backend lists LAYOUTS in that database.
-  4. User picks a layout -> backend fetches its FIELD/TABLE SCHEMA
-     (field names + related "portal" tables) and caches it.
-  5. Profile (server, db, layout, credentials, cached schema) is saved.
-  6. Chatbot uses Gemini function-calling, in a full multi-turn loop, to
-     answer questions about the data (get_records / find_records) AND
-     about the schema itself (describe_schema) using the cached
-     metadata - no guessing. The loop lets the model read a tool's
-     result and respond in natural language (e.g. "The balance for
-     transaction 063548 is 0") instead of just dumping a raw table.
+  3. User picks database(s) and names the profile.
+  4. Profile (server, db, credentials) is saved.
+  5. Chatbot uses Gemini function-calling under the hood. Gemini silently
+     calls tool functions (list_available_layouts, describe_schema, get_records,
+     find_records) to discover layouts and query data based on user questions.
+     The user never has to select or deal with FileMaker layout names.
 
 Run locally:
     pip install -r requirements.txt
@@ -236,7 +232,6 @@ class FileMakerClient:
     def __init__(self, profile: dict):
         self.server_url = profile["server_url"].rstrip("/")
         self.database = profile["database"]
-        self.layout = profile["layout"]
         self.username = profile["username"]
         self.password = profile["password"]
         self.verify_ssl = profile.get("verify_ssl", True)
@@ -246,12 +241,20 @@ class FileMakerClient:
         if not self.token:
             self.token = await fm_login(self.server_url, self.database, self.username, self.password, self.verify_ssl)
 
-    async def get_records(self, limit: int = 20) -> list[dict]:
+    async def list_layouts(self) -> list[str]:
+        await self._ensure_token()
+        return await fm_list_layouts(self.server_url, self.database, self.token, self.verify_ssl)
+
+    async def describe_layout_schema(self, layout_name: str) -> dict:
+        await self._ensure_token()
+        return await fm_layout_schema(self.server_url, self.database, layout_name, self.token, self.verify_ssl)
+
+    async def get_records(self, layout_name: str, limit: int = 20) -> list[dict]:
         await self._ensure_token()
         async with httpx.AsyncClient(verify=self.verify_ssl, timeout=30) as client:
             url = (
                 f"{self.server_url}/fmi/data/vLatest/databases/{self.database}"
-                f"/layouts/{self.layout}/records?_limit={limit}"
+                f"/layouts/{layout_name}/records?_limit={limit}"
             )
             headers = {"Authorization": f"Bearer {self.token}"}
             resp = await client.get(url, headers=headers)
@@ -263,12 +266,12 @@ class FileMakerClient:
             data = resp.json()["response"]["data"]
             return [record["fieldData"] for record in data]
 
-    async def find_records(self, query: dict) -> list[dict]:
+    async def find_records(self, layout_name: str, query: dict) -> list[dict]:
         await self._ensure_token()
         async with httpx.AsyncClient(verify=self.verify_ssl, timeout=30) as client:
             url = (
                 f"{self.server_url}/fmi/data/vLatest/databases/{self.database}"
-                f"/layouts/{self.layout}/_find"
+                f"/layouts/{layout_name}/_find"
             )
             headers = {"Authorization": f"Bearer {self.token}"}
             payload = {"query": [query]}
@@ -283,14 +286,14 @@ class FileMakerClient:
             data = resp.json()["response"]["data"]
             return [record["fieldData"] for record in data]
 
-    async def _find_raw(self, query: dict) -> list[dict]:
+    async def _find_raw(self, layout_name: str, query: dict) -> list[dict]:
         """Same as find_records but keeps the FileMaker recordId, which
         write operations (update/delete) need to target a specific row."""
         await self._ensure_token()
         async with httpx.AsyncClient(verify=self.verify_ssl, timeout=30) as client:
             url = (
                 f"{self.server_url}/fmi/data/vLatest/databases/{self.database}"
-                f"/layouts/{self.layout}/_find"
+                f"/layouts/{layout_name}/_find"
             )
             headers = {"Authorization": f"Bearer {self.token}"}
             payload = {"query": [query]}
@@ -304,10 +307,10 @@ class FileMakerClient:
             resp.raise_for_status()
             return resp.json()["response"]["data"]
 
-    async def create_record(self, fields: dict) -> dict:
+    async def create_record(self, layout_name: str, fields: dict) -> dict:
         await self._ensure_token()
         async with httpx.AsyncClient(verify=self.verify_ssl, timeout=30) as client:
-            url = f"{self.server_url}/fmi/data/vLatest/databases/{self.database}/layouts/{self.layout}/records"
+            url = f"{self.server_url}/fmi/data/vLatest/databases/{self.database}/layouts/{layout_name}/records"
             headers = {"Authorization": f"Bearer {self.token}"}
             resp = await client.post(url, headers=headers, json={"fieldData": fields})
             if resp.status_code == 401:
@@ -317,14 +320,14 @@ class FileMakerClient:
             resp.raise_for_status()
             return {"status": "created", "fields": fields}
 
-    async def update_record(self, query: dict, fields: dict) -> dict:
+    async def update_record(self, layout_name: str, query: dict, fields: dict) -> dict:
         """
         Finds the record matching `query` and updates it with `fields`.
         Safety rule: only proceeds if the query matches EXACTLY ONE
         record. Zero matches or multiple matches are reported back
         instead of guessing which record to change.
         """
-        matches = await self._find_raw(query)
+        matches = await self._find_raw(layout_name, query)
         if not matches:
             return {"status": "not_found", "query": query}
         if len(matches) > 1:
@@ -338,7 +341,7 @@ class FileMakerClient:
         record_id = matches[0]["recordId"]
         await self._ensure_token()
         async with httpx.AsyncClient(verify=self.verify_ssl, timeout=30) as client:
-            url = f"{self.server_url}/fmi/data/vLatest/databases/{self.database}/layouts/{self.layout}/records/{record_id}"
+            url = f"{self.server_url}/fmi/data/vLatest/databases/{self.database}/layouts/{layout_name}/records/{record_id}"
             headers = {"Authorization": f"Bearer {self.token}"}
             resp = await client.patch(url, headers=headers, json={"fieldData": fields})
             if resp.status_code == 401:
@@ -348,12 +351,12 @@ class FileMakerClient:
             resp.raise_for_status()
             return {"status": "updated", "previous": matches[0]["fieldData"], "changed_fields": fields}
 
-    async def delete_record(self, query: dict) -> dict:
+    async def delete_record(self, layout_name: str, query: dict) -> dict:
         """
         Finds the record matching `query` and deletes it. Same safety
         rule as update_record: only proceeds on an exact single match.
         """
-        matches = await self._find_raw(query)
+        matches = await self._find_raw(layout_name, query)
         if not matches:
             return {"status": "not_found", "query": query}
         if len(matches) > 1:
@@ -367,7 +370,7 @@ class FileMakerClient:
         record_id = matches[0]["recordId"]
         await self._ensure_token()
         async with httpx.AsyncClient(verify=self.verify_ssl, timeout=30) as client:
-            url = f"{self.server_url}/fmi/data/vLatest/databases/{self.database}/layouts/{self.layout}/records/{record_id}"
+            url = f"{self.server_url}/fmi/data/vLatest/databases/{self.database}/layouts/{layout_name}/records/{record_id}"
             headers = {"Authorization": f"Bearer {self.token}"}
             resp = await client.delete(url, headers=headers)
             if resp.status_code == 401:
@@ -386,58 +389,95 @@ GEMINI_TOOLS = [
     {
         "function_declarations": [
             {
+                "name": "list_available_layouts",
+                "description": (
+                    "Returns the list of all available layouts (views into the data) in the active "
+                    "database(s). Use this FIRST whenever you are not sure which exact layout name "
+                    "to use for get_records/find_records/etc, or when the user asks what data/tables "
+                    "are available. NEVER guess or invent a layout name - always confirm it exists "
+                    "in this list first."
+                ),
+                "parameters": {"type": "object", "properties": {}},
+            },
+            {
                 "name": "get_records",
-                "description": "Fetch recent records from the active FileMaker layout.",
+                "description": "Fetch recent records from a specific layout in the active FileMaker database(s).",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "limit": {"type": "integer", "description": "Max records to fetch"}
+                        "layout_name": {
+                            "type": "string",
+                            "description": "The EXACT layout name, taken from list_available_layouts - never guessed.",
+                        },
+                        "limit": {"type": "integer", "description": "Max records to fetch"},
                     },
+                    "required": ["layout_name"],
                 },
             },
             {
                 "name": "find_records",
-                "description": "Search FileMaker records matching field criteria.",
+                "description": "Search FileMaker records on a specific layout matching field criteria.",
                 "parameters": {
                     "type": "object",
                     "properties": {
+                        "layout_name": {
+                            "type": "string",
+                            "description": "The EXACT layout name, taken from list_available_layouts - never guessed.",
+                        },
                         "query": {
                             "type": "object",
                             "description": "Field name/value pairs to search for, e.g. {'transactionNumber': '063548'}",
-                        }
+                        },
                     },
-                    "required": ["query"],
+                    "required": ["layout_name", "query"],
                 },
             },
             {
                 "name": "describe_schema",
-                "description": "Explain what fields and related tables exist on the active layout, so the user understands what data is available before querying it.",
-                "parameters": {"type": "object", "properties": {}},
-            },
-            {
-                "name": "create_record",
-                "description": "Creates a brand new record on the active layout with the given field values.",
+                "description": "Explain what fields and related tables exist on a specific layout, so the user understands what data is available before querying it.",
                 "parameters": {
                     "type": "object",
                     "properties": {
+                        "layout_name": {
+                            "type": "string",
+                            "description": "The EXACT layout name, taken from list_available_layouts - never guessed.",
+                        }
+                    },
+                    "required": ["layout_name"],
+                },
+            },
+            {
+                "name": "create_record",
+                "description": "Creates a brand new record on a specific layout with the given field values.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "layout_name": {
+                            "type": "string",
+                            "description": "The EXACT layout name, taken from list_available_layouts - never guessed.",
+                        },
                         "fields": {
                             "type": "object",
                             "description": "Field name/value pairs for the new record, e.g. {'FullName': 'Ali Raza', 'Phone': '0300...'}",
-                        }
+                        },
                     },
-                    "required": ["fields"],
+                    "required": ["layout_name", "fields"],
                 },
             },
             {
                 "name": "update_record",
                 "description": (
-                    "Updates an EXISTING record's fields. You must first identify the record with a "
-                    "specific, unique query (e.g. a transaction number or exact name) - if the query "
-                    "matches more than one record, nothing is changed and you must narrow it down."
+                    "Updates an EXISTING record's fields on a specific layout. You must first identify the "
+                    "record with a specific, unique query (e.g. a transaction number or exact name) - if the "
+                    "query matches more than one record, nothing is changed and you must narrow it down."
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
+                        "layout_name": {
+                            "type": "string",
+                            "description": "The EXACT layout name, taken from list_available_layouts - never guessed.",
+                        },
                         "query": {
                             "type": "object",
                             "description": "Field name/value pairs that uniquely identify the ONE record to update, e.g. {'transactionNumber': '063548'}",
@@ -447,25 +487,29 @@ GEMINI_TOOLS = [
                             "description": "Field name/value pairs to change on that record, e.g. {'FullName': 'New Name'}",
                         },
                     },
-                    "required": ["query", "fields"],
+                    "required": ["layout_name", "query", "fields"],
                 },
             },
             {
                 "name": "delete_record",
                 "description": (
-                    "Permanently deletes an EXISTING record. You must first identify the record with a "
-                    "specific, unique query - if the query matches more than one record, nothing is "
-                    "deleted and you must narrow it down. This action cannot be undone."
+                    "Permanently deletes an EXISTING record on a specific layout. You must first identify "
+                    "the record with a specific, unique query - if the query matches more than one record, "
+                    "nothing is deleted and you must narrow it down. This action cannot be undone."
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
+                        "layout_name": {
+                            "type": "string",
+                            "description": "The EXACT layout name, taken from list_available_layouts - never guessed.",
+                        },
                         "query": {
                             "type": "object",
                             "description": "Field name/value pairs that uniquely identify the ONE record to delete, e.g. {'transactionNumber': '063548'}",
-                        }
+                        },
                     },
-                    "required": ["query"],
+                    "required": ["layout_name", "query"],
                 },
             },
         ]
@@ -505,6 +549,30 @@ user asks to see records "sorted by transaction number" or "with the
 highest balance first", fetch the records and then simply list them in
 that order in your own answer - never tell the user you "don't have a
 sort function", because you can do this yourself with the data you have.
+
+CRITICAL RULE ABOUT LAYOUT NAMES:
+The user is an end user of a FileMaker-based business system (e.g. a shop
+owner) - they do NOT know what a "layout" is and should never be asked to
+name one or be shown FileMaker terminology. Every tool below requires a
+layout_name argument, but YOU must figure that out yourself, silently:
+- NEVER guess, invent, combine, or modify a layout name yourself.
+- If you do not already know the exact layout name for what the user is
+  asking about, call list_available_layouts FIRST and pick the closest
+  matching name from that exact list, based on what the user described.
+  Many databases name each layout EXACTLY the same as the table it
+  represents (e.g. "customers" -> a layout literally named "Customers")
+  - always prefer an exact (case-insensitive) name match over a partial
+  or fuzzy one when one is available.
+- Only pass a layout_name that is an EXACT string taken from the list
+  returned by list_available_layouts - never a variation, abbreviation,
+  or a name the user typed verbatim if it doesn't exactly match.
+- If no layout in the list reasonably matches what the user asked for,
+  tell the user (in plain terms, e.g. "I couldn't find that type of
+  data") - do not mention "layouts" to the user; that word is internal.
+- Once you've correctly identified a layout for a given topic (e.g.
+  "customers" -> "Customers : List") within this conversation, remember
+  and reuse it for follow-up questions about the same topic, instead of
+  calling list_available_layouts again every single time.
 
 HOW TO ANSWER:
 - If the user asks for a specific value (e.g. "what is the balance of
@@ -618,23 +686,28 @@ async def run_tool_across_databases(active: list, name: str, args: dict) -> list
 
     async def run_one(profile_key: str, profile: dict, fm_client: "FileMakerClient") -> dict:
         db_label = profile.get("profile_name") or profile_key
+        layout_name = args.get("layout_name")
         try:
-            if name == "get_records":
-                records = await fm_client.get_records(limit=args.get("limit", 50))
+            if name == "list_available_layouts":
+                layouts = await fm_client.list_layouts()
+                return {"database": db_label, "layouts": layouts}
+            elif name == "get_records":
+                records = await fm_client.get_records(layout_name, limit=args.get("limit", 50))
                 return {"database": db_label, "records": records}
             elif name == "find_records":
-                records = await fm_client.find_records(args.get("query", {}))
+                records = await fm_client.find_records(layout_name, args.get("query", {}))
                 return {"database": db_label, "records": records}
             elif name == "describe_schema":
-                return {"database": db_label, "schema": profile.get("schema", {"fields": [], "related_tables": []})}
+                schema = await fm_client.describe_layout_schema(layout_name)
+                return {"database": db_label, "schema": schema}
             elif name == "create_record":
-                result = await fm_client.create_record(args.get("fields", {}))
+                result = await fm_client.create_record(layout_name, args.get("fields", {}))
                 return {"database": db_label, **result}
             elif name == "update_record":
-                result = await fm_client.update_record(args.get("query", {}), args.get("fields", {}))
+                result = await fm_client.update_record(layout_name, args.get("query", {}), args.get("fields", {}))
                 return {"database": db_label, **result}
             elif name == "delete_record":
-                result = await fm_client.delete_record(args.get("query", {}))
+                result = await fm_client.delete_record(layout_name, args.get("query", {}))
                 return {"database": db_label, **result}
             else:
                 return {"database": db_label, "error": f"Unknown tool: {name}"}
@@ -672,9 +745,21 @@ async def run_chat_loop(cfg: dict, active: list, contents: list, max_turns: int 
 
         candidates = gemini_response.get("candidates", [])
         if not candidates:
-            return "Sorry, I couldn't process that request."
+            return "Sorry, I couldn't process that request (no candidates returned)."
 
-        parts = candidates[0]["content"]["parts"]
+        first_candidate = candidates[0]
+        finish_reason = first_candidate.get("finishReason")
+        if finish_reason and finish_reason not in ("STOP", "MAX_TOKENS"):
+            return f"Gemini request stopped due to finish reason: {finish_reason}."
+
+        content = first_candidate.get("content")
+        if not content:
+            return "Sorry, I couldn't process that request (empty content)."
+
+        parts = content.get("parts", [])
+        if not parts:
+            return "Sorry, I couldn't process that request (no response parts)."
+
         function_call_parts = [p for p in parts if "functionCall" in p]
 
         if not function_call_parts:
@@ -727,11 +812,7 @@ class LayoutsRequest(CredentialsInput):
     database: str
 
 
-class SchemaRequest(LayoutsRequest):
-    layout: str
-
-
-class ProfileSaveRequest(SchemaRequest):
+class ProfileSaveRequest(LayoutsRequest):
     profile_key: str
     profile_name: str
 
@@ -799,39 +880,6 @@ def get_credentials():
     }
 
 
-@app.post("/api/discover/layouts")
-async def discover_layouts(req: LayoutsRequest):
-    cfg = load_config()
-    server_url, username, password, verify_ssl = resolve_credentials(
-        cfg, req.server_url, req.username, req.password, req.verify_ssl
-    )
-    try:
-        token = await fm_login(server_url, req.database, username, password, verify_ssl)
-        layouts = await fm_list_layouts(server_url, req.database, token, verify_ssl)
-        await fm_logout(server_url, req.database, token, verify_ssl)
-    except httpx.HTTPStatusError as e:
-        raise HTTPException(status_code=e.response.status_code, detail="Could not log in to that database.")
-    except httpx.RequestError:
-        raise HTTPException(status_code=502, detail="Could not reach that server. Check the URL and your network.")
-    return {"layouts": layouts}
-
-
-@app.post("/api/discover/schema")
-async def discover_schema(req: SchemaRequest):
-    cfg = load_config()
-    server_url, username, password, verify_ssl = resolve_credentials(
-        cfg, req.server_url, req.username, req.password, req.verify_ssl
-    )
-    try:
-        token = await fm_login(server_url, req.database, username, password, verify_ssl)
-        schema = await fm_layout_schema(server_url, req.database, req.layout, token, verify_ssl)
-        await fm_logout(server_url, req.database, token, verify_ssl)
-    except httpx.HTTPStatusError as e:
-        raise HTTPException(status_code=e.response.status_code, detail="Could not read layout schema.")
-    except httpx.RequestError:
-        raise HTTPException(status_code=502, detail="Could not reach that server. Check the URL and your network.")
-    return schema
-
 
 @app.post("/api/profiles/save")
 async def save_profile(req: ProfileSaveRequest):
@@ -841,10 +889,9 @@ async def save_profile(req: ProfileSaveRequest):
     )
     try:
         token = await fm_login(server_url, req.database, username, password, verify_ssl)
-        schema = await fm_layout_schema(server_url, req.database, req.layout, token, verify_ssl)
         await fm_logout(server_url, req.database, token, verify_ssl)
     except httpx.HTTPStatusError as e:
-        raise HTTPException(status_code=e.response.status_code, detail="Could not verify layout before saving.")
+        raise HTTPException(status_code=e.response.status_code, detail="Could not connect to that database.")
     except httpx.RequestError:
         raise HTTPException(status_code=502, detail="Could not reach that server. Check the URL and your network.")
 
@@ -853,16 +900,14 @@ async def save_profile(req: ProfileSaveRequest):
         "profile_name": req.profile_name,
         "server_url": server_url,
         "database": req.database,
-        "layout": req.layout,
         "username": username,
         "password": password,
         "verify_ssl": verify_ssl,
-        "schema": schema,
     }
     if req.profile_key not in project["active_profiles"]:
         project["active_profiles"].append(req.profile_key)
     save_config(cfg)
-    return {"message": f"Profile '{req.profile_key}' saved.", "schema": schema}
+    return {"message": f"Profile '{req.profile_key}' saved."}
 
 
 # ---------------------------------------------------------------------------
