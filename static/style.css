@@ -20,6 +20,11 @@ body {
   z-index: 100;
 }
 
+/* AI Settings modal reuses .wizard-overlay but should sit above the
+   FileMaker setup wizard when both would otherwise be open at once
+   (e.g. brand-new install: no AI key AND no database yet). */
+#aiSettingsModal { z-index: 110; }
+
 .wizard-card {
   background: #ffffff;
   width: 480px;
@@ -45,7 +50,7 @@ body {
 .wizard-step h2 { margin: 0 0 6px; font-size: 18px; color: #0d47a1; }
 .hint { font-size: 13px; color: #6b84a8; margin: 0 0 16px; }
 
-.wizard-step input {
+.wizard-step input, .wizard-card > input {
   width: 100%;
   padding: 10px 12px;
   margin-bottom: 10px;
@@ -56,7 +61,7 @@ body {
   color: #1a2b45;
 }
 
-.wizard-step input:focus {
+.wizard-step input:focus, .wizard-card > input:focus {
   outline: none;
   border-color: #1e88e5;
   background: #ffffff;

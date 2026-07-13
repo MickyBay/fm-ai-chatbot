@@ -57,6 +57,26 @@
     </div>
   </div>
 
+  <!-- ===================== AI PROVIDER SETTINGS (Gemini / Claude API key) ===================== -->
+  <div id="aiSettingsModal" class="wizard-overlay hidden">
+    <div class="wizard-card">
+      <h2>AI Provider Settings</h2>
+      <p class="hint">Choose which AI powers the chatbot and enter your own API key. The key is stored only in this app's config.json on this server.</p>
+
+      <label class="checkbox-row"><input type="radio" name="aiProvider" id="aiProviderGemini" value="gemini" checked /> Gemini</label>
+      <label class="checkbox-row"><input type="radio" name="aiProvider" id="aiProviderClaude" value="claude" /> Claude</label>
+
+      <input id="aiApiKey" type="password" placeholder="API key" />
+      <input id="aiModel" placeholder="Model (optional — e.g. gemini-2.5-flash or claude-sonnet-4-6)" />
+
+      <div id="aiSettingsError" class="error hidden"></div>
+      <p id="aiSettingsStatus" class="hint"></p>
+
+      <button id="saveAiSettingsBtn" class="btn-primary">Save</button>
+      <button id="closeAiSettingsBtn" class="btn-secondary" style="width:100%; margin-top:8px;">Close</button>
+    </div>
+  </div>
+
   <!-- ===================== MAIN APP ===================== -->
   <div class="app-shell">
 
@@ -72,6 +92,9 @@
       <button id="refreshDatabasesBtn" class="btn-secondary">&#8635; Refresh List</button>
       <button id="addProfileBtn" class="btn-secondary">+ Add New Database</button>
       <button id="deleteProfileBtn" class="btn-secondary danger">Remove Selected</button>
+
+      <h2 class="section-gap">AI Provider</h2>
+      <button id="aiSettingsBtn" class="btn-secondary">&#9881; Gemini / Claude Settings</button>
     </aside>
 
     <main class="chat-main">

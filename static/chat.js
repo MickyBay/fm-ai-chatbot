@@ -53,6 +53,77 @@ document.querySelectorAll("[data-back]").forEach((btn) => {
 });
 
 // ---------------------------------------------------------------------
+// AI Provider settings (Gemini / Claude) - lets ANY normal user plug in
+// their own API key from the frontend, so it's not hardcoded by a
+// developer in config.json ahead of time. Works the same way no matter
+// which provider is chosen ("sab ka sath working ma ho").
+// ---------------------------------------------------------------------
+
+async function loadAiSettings() {
+  try {
+    const res = await fetch(`${API_BASE}/api/settings/ai`);
+    if (!res.ok) return null;
+    const data = await res.json();
+
+    el("aiProviderGemini").checked = data.provider !== "claude";
+    el("aiProviderClaude").checked = data.provider === "claude";
+    el("aiModel").value = data.model || "";
+
+    el("aiSettingsStatus").textContent = data.has_key
+      ? `A ${data.provider === "claude" ? "Claude" : "Gemini"} API key is already saved on this server.`
+      : "No API key saved yet — the chatbot won't be able to answer until one is added.";
+
+    return data;
+  } catch (e) {
+    return null;
+  }
+}
+
+function openAiSettings() {
+  el("aiSettingsModal").classList.remove("hidden");
+  clearError("aiSettingsError");
+  el("aiApiKey").value = "";
+  loadAiSettings();
+}
+
+function closeAiSettings() {
+  el("aiSettingsModal").classList.add("hidden");
+}
+
+el("aiSettingsBtn").addEventListener("click", openAiSettings);
+el("closeAiSettingsBtn").addEventListener("click", closeAiSettings);
+
+el("saveAiSettingsBtn").addEventListener("click", async () => {
+  clearError("aiSettingsError");
+  const provider = el("aiProviderClaude").checked ? "claude" : "gemini";
+  const apiKey = el("aiApiKey").value.trim();
+  const model = el("aiModel").value.trim();
+
+  if (!apiKey) {
+    showError("aiSettingsError", "Please enter an API key.");
+    return;
+  }
+
+  try {
+    const res = await fetch(`${API_BASE}/api/settings/ai`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider, api_key: apiKey, model: model || null }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      showError("aiSettingsError", err.detail || `Could not save settings (${res.status}).`);
+      return;
+    }
+    el("aiApiKey").value = "";
+    await loadAiSettings();
+    closeAiSettings();
+  } catch (e) {
+    showError("aiSettingsError", "Could not reach the server.");
+  }
+});
+
+// ---------------------------------------------------------------------
 // Shared saved credentials ("Zeeshan already set these up" shortcut)
 // ---------------------------------------------------------------------
 
@@ -572,6 +643,11 @@ async function sendMessage(message) {
         // response wasn't JSON - keep the generic status-code message
       }
       appendMessage(detail, "bot");
+      // If the server is telling us there's no API key set up yet, pop
+      // the AI Settings modal open so the user can fix it right away.
+      if (res.status === 400 && /API key/i.test(detail)) {
+        openAiSettings();
+      }
       return;
     }
 
@@ -664,6 +740,15 @@ el("clearChatBtn").addEventListener("click", () => {
 // Run sequential initialization so elements like projectSelect are fully loaded
 async function init() {
   updateQuotaBadge();
+
+  // If no AI provider key has been set up yet, open the Settings modal
+  // right away so a brand-new user isn't stuck with a chat that silently
+  // fails - "koi bhi user apna Claude ya Gemini API key daal sake".
+  const aiStatus = await loadAiSettings();
+  if (!aiStatus || !aiStatus.has_key) {
+    openAiSettings();
+  }
+
   await loadProjects();
   await loadProfiles();
 }

@@ -6,19 +6,29 @@ Flow:
   2. Backend calls FileMaker Data API to list available DATABASES.
   3. User picks database(s) and names the profile.
   4. Profile (server, db, credentials) is saved.
-  5. Chatbot uses Gemini function-calling under the hood. Gemini silently
-     calls tool functions (list_available_layouts, describe_schema, get_records,
-     find_records) to discover layouts and query data based on user questions.
-     The user never has to select or deal with FileMaker layout names.
+  5. Chatbot uses either Gemini OR Claude function-calling under the hood
+     (user's own choice, set from the frontend Settings modal - see
+     /api/settings/ai). The model silently calls tool functions
+     (list_available_layouts, describe_schema, get_records, find_records,
+     create_record, update_record, delete_record) to discover layouts and
+     query data based on user questions. The user never has to select or
+     deal with FileMaker layout names.
 
 Run locally:
     pip install -r requirements.txt
     uvicorn main:app --reload --port 8000
+
+Or on Windows, just double-click setup_and_run.bat - it does all of the
+above automatically (creates a virtual environment, installs packages,
+and starts the server).
 """
 
 import asyncio
 import json
+import sys
+import threading
 import time
+import webbrowser
 from pathlib import Path
 from typing import Optional
 
@@ -28,7 +38,22 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-CONFIG_PATH = Path(__file__).parent / "config.json"
+# ---------------------------------------------------------------------------
+# Resource paths - aware of running as a plain script VS a PyInstaller-built
+# standalone .exe ("frozen"). When frozen, bundled read-only files (static/,
+# config.example.json) live in a temporary extraction folder (sys._MEIPASS),
+# but user data (config.json) must be written next to the actual .exe so it
+# survives between runs - Sohaib wants this to behave like a normal app with
+# nothing to install, so both cases are handled transparently here.
+# ---------------------------------------------------------------------------
+if getattr(sys, "frozen", False):
+    BASE_DIR = Path(sys._MEIPASS)          # bundled, read-only resources
+    APP_DIR = Path(sys.executable).parent  # writable, next to the .exe
+else:
+    BASE_DIR = Path(__file__).parent
+    APP_DIR = BASE_DIR
+
+CONFIG_PATH = APP_DIR / "config.json"
 
 app = FastAPI(title="fm-ai-chatbot")
 
@@ -40,6 +65,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+DEFAULT_CLAUDE_MODEL = "claude-sonnet-4-6"
+
 
 # ---------------------------------------------------------------------------
 # Config helpers
@@ -47,7 +75,15 @@ app.add_middleware(
 
 def load_config() -> dict:
     if not CONFIG_PATH.exists():
-        raise HTTPException(status_code=500, detail="config.json not found")
+        # First run - no separate setup step needed ("end user ko kuch
+        # nahi karna"): create a starter config.json next to the app
+        # automatically, from the bundled template if there is one.
+        example_path = BASE_DIR / "config.example.json"
+        if example_path.exists():
+            CONFIG_PATH.write_text(example_path.read_text())
+        else:
+            CONFIG_PATH.write_text(json.dumps({"projects": {}}, indent=2))
+
     cfg = json.loads(CONFIG_PATH.read_text())
 
     # --- Migration: single "active_profile" (str) -> "active_profiles" (list) ---
@@ -94,6 +130,35 @@ def load_config() -> dict:
         cfg.pop("active_profile", None)
 
     cfg.setdefault("active_project", next(iter(cfg["projects"]), None))
+
+    # --- Migration: single-provider "gemini" block -> multi-provider "ai" block ---
+    # Sohaib wants any normal user to be able to plug in their OWN Gemini
+    # OR Claude API key from the frontend (Settings), instead of it being
+    # hardcoded once in config.json. This keeps both provider's settings
+    # side by side so switching providers doesn't lose the other key.
+    if "ai" not in cfg:
+        old_gemini = cfg.get("gemini", {}) or {}
+        cfg["ai"] = {
+            "provider": "gemini",
+            "daily_request_limit": old_gemini.get("daily_request_limit", 20),
+            "gemini": {
+                "api_key": old_gemini.get("api_key", ""),
+                "model": old_gemini.get("model", DEFAULT_GEMINI_MODEL),
+            },
+            "claude": {
+                "api_key": "",
+                "model": DEFAULT_CLAUDE_MODEL,
+            },
+        }
+        cfg.pop("gemini", None)
+
+    cfg["ai"].setdefault("provider", "gemini")
+    cfg["ai"].setdefault("daily_request_limit", 20)
+    cfg["ai"].setdefault("gemini", {"api_key": "", "model": DEFAULT_GEMINI_MODEL})
+    cfg["ai"].setdefault("claude", {"api_key": "", "model": DEFAULT_CLAUDE_MODEL})
+    cfg["ai"]["gemini"].setdefault("model", DEFAULT_GEMINI_MODEL)
+    cfg["ai"]["claude"].setdefault("model", DEFAULT_CLAUDE_MODEL)
+
     return cfg
 
 
@@ -138,7 +203,7 @@ def get_active_profiles(cfg: dict) -> list[tuple[str, dict]]:
 
 
 # ---------------------------------------------------------------------------
-# Daily Gemini quota tracker
+# Daily AI-provider quota tracker (shared across whichever provider is active)
 # ---------------------------------------------------------------------------
 
 _quota_state = {"date": None, "count": 0}
@@ -152,7 +217,7 @@ def check_and_increment_quota(limit: int):
     if _quota_state["count"] >= limit:
         raise HTTPException(
             status_code=429,
-            detail=f"Daily Gemini quota ({limit} requests) reached. Try again tomorrow.",
+            detail=f"Daily quota ({limit} requests) reached. Try again tomorrow.",
         )
     _quota_state["count"] += 1
 
@@ -382,7 +447,10 @@ class FileMakerClient:
 
 
 # ---------------------------------------------------------------------------
-# Gemini integration
+# AI provider integration - Gemini and Claude, chosen by the user from the
+# frontend Settings modal. Both share the same tool definitions (the tool
+# names/args are identical) and the same run_tool_across_databases executor;
+# only the wire format each provider's API expects is different.
 # ---------------------------------------------------------------------------
 
 GEMINI_TOOLS = [
@@ -516,6 +584,21 @@ GEMINI_TOOLS = [
     }
 ]
 
+
+def _gemini_tools_to_claude_tools() -> list:
+    """Claude's tool format is name/description/input_schema, which lines
+    up almost 1:1 with Gemini's function_declarations parameters - so we
+    derive it once instead of maintaining two separate tool lists that
+    could drift out of sync."""
+    fdecls = GEMINI_TOOLS[0]["function_declarations"]
+    return [
+        {"name": fd["name"], "description": fd["description"], "input_schema": fd["parameters"]}
+        for fd in fdecls
+    ]
+
+
+CLAUDE_TOOLS = _gemini_tools_to_claude_tools()
+
 SYSTEM_INSTRUCTIONS = """
 You are a helpful assistant that answers questions about the user's
 currently active FileMaker database(s). One or MORE databases may be
@@ -645,8 +728,9 @@ WRITE OPERATIONS (create_record, update_record, delete_record) - SAFETY RULES:
 
 
 async def call_gemini(contents: list, cfg: dict, max_retries: int = 2) -> dict:
-    api_key = cfg["gemini"]["api_key"]
-    model = cfg["gemini"].get("model", "gemini-2.5-flash")
+    provider_cfg = cfg["ai"]["gemini"]
+    api_key = provider_cfg["api_key"]
+    model = provider_cfg.get("model") or DEFAULT_GEMINI_MODEL
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
 
     body = {
@@ -672,6 +756,40 @@ async def call_gemini(contents: list, cfg: dict, max_retries: int = 2) -> dict:
         return resp.json()
 
     last_error.raise_for_status()  # exhausted retries - raise the last error
+
+
+async def call_claude(messages: list, cfg: dict, max_retries: int = 2) -> dict:
+    provider_cfg = cfg["ai"]["claude"]
+    api_key = provider_cfg["api_key"]
+    model = provider_cfg.get("model") or DEFAULT_CLAUDE_MODEL
+    url = "https://api.anthropic.com/v1/messages"
+    headers = {
+        "x-api-key": api_key,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    }
+    body = {
+        "model": model,
+        "max_tokens": 4096,
+        "system": SYSTEM_INSTRUCTIONS,
+        "tools": CLAUDE_TOOLS,
+        "messages": messages,
+    }
+
+    last_error = None
+    for attempt in range(max_retries + 1):
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(url, headers=headers, json=body)
+
+        if resp.status_code in (503, 429) and attempt < max_retries:
+            last_error = resp
+            await asyncio.sleep(2 * (attempt + 1))
+            continue
+
+        resp.raise_for_status()
+        return resp.json()
+
+    last_error.raise_for_status()
 
 
 async def run_tool_across_databases(active: list, name: str, args: dict) -> list:
@@ -722,9 +840,9 @@ async def run_tool_across_databases(active: list, name: str, args: dict) -> list
 
 async def run_chat_loop(cfg: dict, active: list, contents: list, max_turns: int = 5) -> str:
     """
-    Runs the full tool-calling loop: send the conversation to Gemini,
-    execute any tool it asks for (against every active database), feed
-    the results back, and repeat until Gemini returns a final
+    Gemini version of the tool-calling loop: send the conversation to
+    Gemini, execute any tool it asks for (against every active database),
+    feed the results back, and repeat until Gemini returns a final
     natural-language answer (or max_turns is hit).
 
     `active` is a list of (profile_key, profile_dict, fm_client) tuples -
@@ -754,10 +872,12 @@ async def run_chat_loop(cfg: dict, active: list, contents: list, max_turns: int 
 
         content = first_candidate.get("content")
         if not content:
+            print("GEMINI DEBUG - empty content, full response:", json.dumps(gemini_response, indent=2))
             return "Sorry, I couldn't process that request (empty content)."
 
         parts = content.get("parts", [])
         if not parts:
+            print("GEMINI DEBUG - no parts, full response:", json.dumps(gemini_response, indent=2))
             return "Sorry, I couldn't process that request (no response parts)."
 
         function_call_parts = [p for p in parts if "functionCall" in p]
@@ -783,6 +903,58 @@ async def run_chat_loop(cfg: dict, active: list, contents: list, max_turns: int 
         # functionResponse parts has role "user".
         contents.append({"role": "model", "parts": function_call_parts})
         contents.append({"role": "user", "parts": function_responses})
+
+    return "Sorry, I couldn't get a final answer within the allowed steps."
+
+
+async def run_chat_loop_claude(cfg: dict, active: list, messages: list, max_turns: int = 5) -> str:
+    """
+    Claude version of the same tool-calling loop as run_chat_loop, using
+    the Anthropic Messages API's tool_use / tool_result blocks instead of
+    Gemini's functionCall / functionResponse parts.
+    """
+    for _ in range(max_turns):
+        try:
+            claude_response = await call_claude(messages, cfg)
+        except KeyError as e:
+            raise HTTPException(status_code=500, detail=f"config.json is missing key: {e}")
+        except httpx.HTTPStatusError as e:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Claude API rejected the request ({e.response.status_code}): {e.response.text[:300]}",
+            )
+        except httpx.RequestError:
+            raise HTTPException(status_code=502, detail="Could not reach the Claude API. Check your internet connection.")
+
+        stop_reason = claude_response.get("stop_reason")
+        content = claude_response.get("content", [])
+        if not content:
+            return "Sorry, I couldn't process that request (empty content)."
+
+        tool_use_blocks = [b for b in content if b.get("type") == "tool_use"]
+
+        if stop_reason != "tool_use" or not tool_use_blocks:
+            text_parts = [b["text"] for b in content if b.get("type") == "text"]
+            return " ".join(text_parts) if text_parts else "Sorry, I couldn't process that request."
+
+        # The assistant turn that requested tools must be echoed back
+        # verbatim, followed by a user turn containing the matching
+        # tool_result blocks (Anthropic Messages API convention).
+        messages.append({"role": "assistant", "content": content})
+
+        tool_results = []
+        for block in tool_use_blocks:
+            name = block["name"]
+            args = block.get("input", {})
+            result = await run_tool_across_databases(active, name, args)
+            tool_results.append(
+                {
+                    "type": "tool_result",
+                    "tool_use_id": block["id"],
+                    "content": json.dumps(result),
+                }
+            )
+        messages.append({"role": "user", "content": tool_results})
 
     return "Sorry, I couldn't get a final answer within the allowed steps."
 
@@ -815,6 +987,12 @@ class LayoutsRequest(CredentialsInput):
 class ProfileSaveRequest(LayoutsRequest):
     profile_key: str
     profile_name: str
+
+
+class AISettingsRequest(BaseModel):
+    provider: str  # "gemini" or "claude"
+    api_key: str
+    model: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -1017,6 +1195,45 @@ def delete_project(key: str):
 
 
 # ---------------------------------------------------------------------------
+# AI provider settings - lets ANY normal user plug in their own Gemini or
+# Claude API key from the frontend, instead of it being hardcoded in
+# config.json by a developer ahead of time.
+# ---------------------------------------------------------------------------
+
+@app.get("/api/settings/ai")
+def get_ai_settings():
+    cfg = load_config()
+    ai = cfg.get("ai", {})
+    provider = ai.get("provider", "gemini")
+    provider_cfg = ai.get(provider, {})
+    return {
+        "provider": provider,
+        "has_key": bool(provider_cfg.get("api_key")),
+        "model": provider_cfg.get("model", ""),
+    }
+
+
+@app.post("/api/settings/ai")
+def save_ai_settings(req: AISettingsRequest):
+    provider = req.provider.strip().lower()
+    if provider not in ("gemini", "claude"):
+        raise HTTPException(status_code=400, detail="provider must be 'gemini' or 'claude'.")
+    api_key = req.api_key.strip()
+    if not api_key:
+        raise HTTPException(status_code=400, detail="API key is required.")
+
+    cfg = load_config()
+    cfg["ai"]["provider"] = provider
+    cfg["ai"][provider]["api_key"] = api_key
+    if req.model and req.model.strip():
+        cfg["ai"][provider]["model"] = req.model.strip()
+    elif not cfg["ai"][provider].get("model"):
+        cfg["ai"][provider]["model"] = DEFAULT_GEMINI_MODEL if provider == "gemini" else DEFAULT_CLAUDE_MODEL
+    save_config(cfg)
+    return {"message": f"{provider.title()} settings saved."}
+
+
+# ---------------------------------------------------------------------------
 # Chat
 # ---------------------------------------------------------------------------
 
@@ -1028,24 +1245,66 @@ def health():
 @app.post("/api/chat")
 async def chat(req: ChatRequest):
     cfg = load_config()
-    check_and_increment_quota(cfg["gemini"].get("daily_request_limit", 20))
+    ai_cfg = cfg.get("ai", {})
+    provider = ai_cfg.get("provider", "gemini")
+    provider_settings = ai_cfg.get(provider, {})
+
+    if not provider_settings.get("api_key"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"No {provider.title()} API key set up yet. Open AI Settings in the sidebar and add your API key first.",
+        )
+
+    check_and_increment_quota(ai_cfg.get("daily_request_limit", 20))
 
     # One or more databases can be active at once (Nigah may have selected
     # just LaundryPOS, just TAILORINGDEV, or both together).
     active_profiles = get_active_profiles(cfg)
     active = [(key, profile, FileMakerClient(profile)) for key, profile in active_profiles]
 
-    # Build the conversation: prior turns (if any) + the new question.
-    # This is what gives the chatbot memory across follow-up questions
-    # like "show me those again but sorted by name".
-    contents = []
-    for msg in req.history:
-        role = "model" if msg.role == "bot" else "user"
-        contents.append({"role": role, "parts": [{"text": msg.text}]})
-    contents.append({"role": "user", "parts": [{"text": req.message}]})
+    if provider == "claude":
+        # Anthropic Messages API: plain string content for normal turns.
+        messages = []
+        for msg in req.history:
+            role = "assistant" if msg.role == "bot" else "user"
+            messages.append({"role": role, "content": msg.text})
+        messages.append({"role": "user", "content": req.message})
+        answer_text = await run_chat_loop_claude(cfg, active, messages)
+    else:
+        # Build the conversation: prior turns (if any) + the new question.
+        # This is what gives the chatbot memory across follow-up questions
+        # like "show me those again but sorted by name".
+        contents = []
+        for msg in req.history:
+            role = "model" if msg.role == "bot" else "user"
+            contents.append({"role": role, "parts": [{"text": msg.text}]})
+        contents.append({"role": "user", "parts": [{"text": req.message}]})
+        answer_text = await run_chat_loop(cfg, active, contents)
 
-    answer_text = await run_chat_loop(cfg, active, contents)
     return {"type": "text", "data": answer_text}
 
 
-app.mount("/", StaticFiles(directory=Path(__file__).parent / "static", html=True), name="static")
+app.mount("/", StaticFiles(directory=BASE_DIR / "static", html=True), name="static")
+
+
+# ---------------------------------------------------------------------------
+# Standalone launch entrypoint - lets this run like a normal double-click
+# app (as a plain script during development, or as a PyInstaller .exe for
+# end users): starts the server AND opens the browser automatically, so
+# there is nothing else for the user to run or type.
+# ---------------------------------------------------------------------------
+
+def _open_browser_after_delay(url: str, delay_seconds: float = 1.5) -> None:
+    def _open():
+        time.sleep(delay_seconds)
+        webbrowser.open(url)
+
+    threading.Thread(target=_open, daemon=True).start()
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    PORT = 8000
+    _open_browser_after_delay(f"http://127.0.0.1:{PORT}")
+    uvicorn.run(app, host="127.0.0.1", port=PORT)

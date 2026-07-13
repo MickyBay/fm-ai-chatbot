@@ -1,4 +1,6 @@
 venv/
-config.json
 __pycache__/
 *.pyc
+build/
+dist/
+config.json
