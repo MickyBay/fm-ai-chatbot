@@ -11,16 +11,16 @@ Mocks FileMaker + Gemini calls (no real network needed) and exercises:
 Safe to re-run: your real config.json is backed up first and always
 restored at the end, even if a test fails.
 """
-import json
-import shutil
 import sys
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent))
+import main  # Import first to get AppData CONFIG_PATH
+import json
+import shutil
 from unittest.mock import AsyncMock, patch
 
-sys.path.insert(0, str(Path(__file__).parent))
-
-CONFIG_PATH = Path(__file__).parent / "config.json"
-BACKUP_PATH = Path(__file__).parent / "config_backup.json"
+CONFIG_PATH = main.CONFIG_PATH
+BACKUP_PATH = CONFIG_PATH.with_name("config_backup.json")
 
 if CONFIG_PATH.exists():
     shutil.copy(CONFIG_PATH, BACKUP_PATH)
@@ -50,11 +50,10 @@ try:
                 "schema": {"fields": ["OrderID", "CustomerName", "Balance"], "related_tables": []},
             },
         },
-        "gemini": {"api_key": "FAKE_KEY", "model": "gemini-2.5-flash", "daily_request_limit": 20},
+        "gemini": {"api_key": "FAKE_KEY", "model": "gemini-3.5-flash", "daily_request_limit": 20},
     }
     CONFIG_PATH.write_text(json.dumps(seed, indent=2))
 
-    import main  # noqa: E402
     from fastapi.testclient import TestClient  # noqa: E402
 
     client = TestClient(main.app)
@@ -78,7 +77,7 @@ try:
     print("\n== 4. /api/chat with both databases active ==")
     calls_seen = []
 
-    async def fake_get_records(self, limit=20):
+    async def fake_get_records(self, layout_name: str, limit=20):
         calls_seen.append(self.database)
         if self.database == "LaundryPOS":
             return [{"Phone": "0300-1111111", "BalanceBK": "0"}]
@@ -111,7 +110,7 @@ try:
     print("\n== 5. one database errors out, the other still answers ==")
     gemini_call_count["n"] = 0
 
-    async def flaky_get_records(self, limit=20):
+    async def flaky_get_records(self, layout_name: str, limit=20):
         if self.database == "LaundryPOS":
             import httpx
             raise httpx.ConnectError("boom")

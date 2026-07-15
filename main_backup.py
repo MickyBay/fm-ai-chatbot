@@ -888,8 +888,6 @@ async def run_tool_across_databases(active: list, name: str, args: dict) -> list
             return {"database": db_label, "error": f"FileMaker error ({e.response.status_code}): {e.response.text[:200]}"}
         except httpx.RequestError:
             return {"database": db_label, "error": "Could not reach this FileMaker server."}
-        except Exception as e:
-            return {"database": db_label, "error": f"Internal database error: {str(e)}"}
 
     tasks = [run_one(key, profile, fm_client) for key, profile, fm_client in active]
     return await asyncio.gather(*tasks)
@@ -964,15 +962,12 @@ async def run_chat_loop(cfg: dict, active: list, contents: list, max_turns: int 
 
             result = await run_tool_across_databases(active, name, args)
 
-            response_part = {"functionResponse": {"name": name, "response": {"result": result}}}
-            if "id" in fn:
-                response_part["functionResponse"]["id"] = fn["id"]
-            function_responses.append(response_part)
+            function_responses.append({"functionResponse": {"name": name, "response": {"result": result}}})
 
         # Per the Gemini REST API: the turn holding functionCall parts
         # has role "model"; the turn holding the matching
         # functionResponse parts has role "user".
-        contents.append(content)
+        contents.append({"role": "model", "parts": function_call_parts})
         contents.append({"role": "user", "parts": function_responses})
 
     return "Sorry, I couldn't get a final answer within the allowed steps."
