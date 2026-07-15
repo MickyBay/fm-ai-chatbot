@@ -9,7 +9,7 @@
   "profiles": {},
   "gemini": {
     "api_key": "YOUR_GEMINI_API_KEY",
-    "model": "gemini-2.5-flash",
-    "daily_request_limit": 20
+    "model": "gemini-3.5-flash",
+    "daily_request_limit": 50
   }
 }

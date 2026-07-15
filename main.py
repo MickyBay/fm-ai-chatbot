@@ -41,17 +41,24 @@ from pydantic import BaseModel
 # ---------------------------------------------------------------------------
 # Resource paths - aware of running as a plain script VS a PyInstaller-built
 # standalone .exe ("frozen"). When frozen, bundled read-only files (static/,
-# config.example.json) live in a temporary extraction folder (sys._MEIPASS),
-# but user data (config.json) must be written next to the actual .exe so it
-# survives between runs - Sohaib wants this to behave like a normal app with
-# nothing to install, so both cases are handled transparently here.
+# config.example.json) live in a temporary extraction folder (sys._MEIPASS).
+#
+# User data (config.json) is ALWAYS written to a fixed location in the
+# user's AppData folder - NOT next to the .exe or the script. This ensures
+# the exact same config.json is used whether the app is run as a plain
+# script (during development, e.g. `uvicorn main:app`) or as a built .exe
+# (for end users, e.g. Sohaib double-clicking FileMaker-AI-Chatbot.exe), so
+# data never silently splits across two different files depending on how
+# the app happened to be launched, and it survives even if the .exe is
+# moved to a different folder later.
 # ---------------------------------------------------------------------------
 if getattr(sys, "frozen", False):
     BASE_DIR = Path(sys._MEIPASS)          # bundled, read-only resources
-    APP_DIR = Path(sys.executable).parent  # writable, next to the .exe
 else:
     BASE_DIR = Path(__file__).parent
-    APP_DIR = BASE_DIR
+
+APP_DIR = Path.home() / "AppData" / "Local" / "FileMaker-AI-Chatbot"
+APP_DIR.mkdir(parents=True, exist_ok=True)
 
 CONFIG_PATH = APP_DIR / "config.json"
 
@@ -65,7 +72,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+DEFAULT_GEMINI_MODEL = "gemini-3.5-flash"
 DEFAULT_CLAUDE_MODEL = "claude-sonnet-4-6"
 
 
@@ -646,12 +653,45 @@ layout_name argument, but YOU must figure that out yourself, silently:
   represents (e.g. "customers" -> a layout literally named "Customers")
   - always prefer an exact (case-insensitive) name match over a partial
   or fuzzy one when one is available.
+- The user's wording will rarely match a layout name exactly - expect
+  typos, extra/missing spaces, singular vs plural (e.g. "customer" vs
+  "Customers"), and partial names. Normalize mentally before comparing:
+  ignore case, ignore extra whitespace, and match on the core word
+  (e.g. "custmer list", "Customer", "customers" should all match a
+  layout literally named "Customers : List"). Do not require an exact
+  character-for-character match to consider it found.
 - Only pass a layout_name that is an EXACT string taken from the list
   returned by list_available_layouts - never a variation, abbreviation,
   or a name the user typed verbatim if it doesn't exactly match.
+- If your first attempt at a layout_name comes back as an error or
+  "not found" from a tool, do NOT keep guessing new variations one at a
+  time - call list_available_layouts (if you haven't already in this
+  conversation) and pick the correct name directly from that returned
+  list instead of guessing blind again.
 - If no layout in the list reasonably matches what the user asked for,
   tell the user (in plain terms, e.g. "I couldn't find that type of
   data") - do not mention "layouts" to the user; that word is internal.
+- WHEN SEVERAL LAYOUTS HAVE SIMILAR NAMES (e.g. "Services : List",
+  "Services : Form", "Services_Price", "Service", "Services Type :
+  List Card Window" all exist for one topic): do NOT call
+  describe_schema on multiple candidates one after another to compare
+  them - this wastes steps and often still fails to produce an answer.
+  Instead:
+  1. Pick ONE best guess immediately: prefer a name containing "List"
+     when the user wants to browse/see multiple records (that is the
+     normal browse view); prefer a name containing "Form" only if the
+     user is asking about a single specific record's full layout of
+     fields; ignore layout names containing "Card Window" unless
+     nothing else matches.
+  2. Call get_records (or find_records) on that ONE guess directly -
+     do not call describe_schema first just to "check" it unless the
+     user's request needs specific field names you don't already have
+     from the records themselves.
+  3. Only if that call errors or returns clearly wrong data, try your
+     NEXT best guess from the list - one at a time, maximum two total
+     attempts. If both fail, tell the user you couldn't find that data
+     rather than continuing to try every remaining similarly-named
+     layout.
 - Once you've correctly identified a layout for a given topic (e.g.
   "customers" -> "Customers : List") within this conversation, remember
   and reuse it for follow-up questions about the same topic, instead of
@@ -741,8 +781,17 @@ async def call_gemini(contents: list, cfg: dict, max_retries: int = 2) -> dict:
 
     last_error = None
     for attempt in range(max_retries + 1):
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(url, json=body)
+        try:
+            async with httpx.AsyncClient(timeout=60) as client:
+                resp = await client.post(url, json=body)
+        except httpx.RequestError as e:
+            # Connection drops / timeouts are common when Google's servers
+            # are under heavy load - retry with backoff instead of failing
+            # the whole chat turn on the first blip.
+            if attempt < max_retries:
+                await asyncio.sleep(2 * (attempt + 1))  # 2s, then 4s
+                continue
+            raise
 
         # 503 (model overloaded) and 429 (rate limited) are transient -
         # Google's own docs recommend a short retry for these, rather
@@ -778,8 +827,14 @@ async def call_claude(messages: list, cfg: dict, max_retries: int = 2) -> dict:
 
     last_error = None
     for attempt in range(max_retries + 1):
-        async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.post(url, headers=headers, json=body)
+        try:
+            async with httpx.AsyncClient(timeout=60) as client:
+                resp = await client.post(url, headers=headers, json=body)
+        except httpx.RequestError as e:
+            if attempt < max_retries:
+                await asyncio.sleep(2 * (attempt + 1))
+                continue
+            raise
 
         if resp.status_code in (503, 429) and attempt < max_retries:
             last_error = resp
@@ -838,7 +893,7 @@ async def run_tool_across_databases(active: list, name: str, args: dict) -> list
     return await asyncio.gather(*tasks)
 
 
-async def run_chat_loop(cfg: dict, active: list, contents: list, max_turns: int = 5) -> str:
+async def run_chat_loop(cfg: dict, active: list, contents: list, max_turns: int = 8) -> str:
     """
     Gemini version of the tool-calling loop: send the conversation to
     Gemini, execute any tool it asks for (against every active database),
@@ -882,6 +937,17 @@ async def run_chat_loop(cfg: dict, active: list, contents: list, max_turns: int 
 
         function_call_parts = [p for p in parts if "functionCall" in p]
 
+        # TEMP DEBUG - remove once the "couldn't get final answer" issue is
+        # resolved. Prints what the model asked for on every turn.
+        print(
+            "GEMINI TURN DEBUG - finish_reason:", finish_reason,
+            "| function_calls:", [
+                {"name": p["functionCall"]["name"], "args": p["functionCall"].get("args", {})}
+                for p in function_call_parts
+            ],
+            "| text_parts:", [p["text"] for p in parts if "text" in p],
+        )
+
         if not function_call_parts:
             text_parts = [p["text"] for p in parts if "text" in p]
             return " ".join(text_parts) if text_parts else "Sorry, I couldn't process that request."
@@ -907,7 +973,7 @@ async def run_chat_loop(cfg: dict, active: list, contents: list, max_turns: int 
     return "Sorry, I couldn't get a final answer within the allowed steps."
 
 
-async def run_chat_loop_claude(cfg: dict, active: list, messages: list, max_turns: int = 5) -> str:
+async def run_chat_loop_claude(cfg: dict, active: list, messages: list, max_turns: int = 8) -> str:
     """
     Claude version of the same tool-calling loop as run_chat_loop, using
     the Anthropic Messages API's tool_use / tool_result blocks instead of
