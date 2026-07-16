@@ -53,11 +53,119 @@ document.querySelectorAll("[data-back]").forEach((btn) => {
 });
 
 // ---------------------------------------------------------------------
-// AI Provider settings (Gemini / Claude) - lets ANY normal user plug in
-// their own API key from the frontend, so it's not hardcoded by a
-// developer in config.json ahead of time. Works the same way no matter
-// which provider is chosen ("sab ka sath working ma ho").
+// AI Provider settings - lets ANY normal user plug in their own API key
+// for ANY provider (not just Gemini/Claude) from the frontend, so it's
+// not hardcoded by a developer in config.json ahead of time. The
+// dropdown itself is built from whatever the backend's PROVIDER_REGISTRY
+// currently knows about, plus an "Other / Custom..." option for
+// anything else (DeepSeek, Groq, a local model server, etc - "koi bhi
+// provider daal sako").
 // ---------------------------------------------------------------------
+
+let knownProviders = {}; // { providerKey: { label, api_style, default_model } }
+let configuredProviders = {}; // { providerKey: { has_key, model } } - whatever already has a saved key
+
+function populateAiProviderSelect(selectedProvider) {
+  const select = el("aiProviderSelect");
+  select.innerHTML = "";
+
+  Object.entries(knownProviders).forEach(([key, info]) => {
+    const opt = document.createElement("option");
+    opt.value = key;
+    opt.textContent = info.label || key;
+    select.appendChild(opt);
+  });
+
+  const customOpt = document.createElement("option");
+  customOpt.value = "__custom__";
+  customOpt.textContent = "Other / Custom...";
+  select.appendChild(customOpt);
+
+  const isKnown = Object.prototype.hasOwnProperty.call(knownProviders, selectedProvider);
+  select.value = isKnown ? selectedProvider : "__custom__";
+  toggleCustomFields(!isKnown);
+
+  if (!isKnown && selectedProvider) {
+    el("aiCustomProviderName").value = selectedProvider;
+  }
+}
+
+function toggleCustomFields(show) {
+  el("aiCustomFields").classList.toggle("hidden", !show);
+}
+
+// Refreshes the Model field + status line to match whichever provider is
+// CURRENTLY selected in the dropdown - without this, switching from
+// Gemini to Claude in the dropdown left Gemini's model/status showing,
+// which looked like the save had gone to the wrong provider.
+function refreshFieldsForSelectedProvider() {
+  const selected = el("aiProviderSelect").value;
+
+  if (selected === "__custom__") {
+    el("aiOAuthBlock").classList.add("hidden");
+    el("aiApiKeyWrapper").classList.remove("hidden");
+    const customName = el("aiCustomProviderName").value.trim().toLowerCase();
+    const saved = customName ? configuredProviders[customName] : null;
+    el("aiModel").value = saved ? saved.model || "" : "";
+    el("aiSettingsStatus").textContent = saved && saved.has_key
+      ? `An API key is already saved for '${customName}' on this server.`
+      : "Enter this custom provider's details below.";
+    return;
+  }
+
+  const label = knownProviders[selected]?.label || selected;
+  const saved = configuredProviders[selected];
+  el("aiModel").value = saved ? saved.model || "" : "";
+
+  // Check if preset supports OAuth
+  const supportsOAuth = ["gemini", "claude", "openai"].includes(selected);
+
+  if (supportsOAuth) {
+    el("aiOAuthBlock").classList.remove("hidden");
+    const oauthBtn = el("aiOAuthBtn");
+    
+    let providerLabel = "Google";
+    if (selected === "claude") providerLabel = "Anthropic";
+    if (selected === "openai") providerLabel = "OpenAI";
+    
+    oauthBtn.textContent = `Sign in with ${providerLabel}`;
+    oauthBtn.className = `btn-oauth btn-${selected}`;
+    
+    if (saved && saved.has_oauth) {
+      el("oauthLinkedBadge").classList.remove("hidden");
+      oauthBtn.classList.add("hidden");
+      el("aiApiKeyWrapper").classList.add("hidden");
+      el("aiSettingsStatus").textContent = `${label} is connected via OAuth.`;
+    } else {
+      el("oauthLinkedBadge").classList.add("hidden");
+      oauthBtn.classList.remove("hidden");
+      el("aiApiKeyWrapper").classList.remove("hidden");
+      
+      if (saved && saved.has_key) {
+        el("aiSettingsStatus").textContent = `A ${label} API key is already saved on this server, or you can link via OAuth above.`;
+      } else {
+        el("aiSettingsStatus").textContent = `No ${label} API key or OAuth connected yet. Add one below to use it.`;
+      }
+    }
+  } else {
+    el("aiOAuthBlock").classList.add("hidden");
+    el("aiApiKeyWrapper").classList.remove("hidden");
+    
+    if (saved && saved.has_key) {
+      el("aiSettingsStatus").textContent = `A ${label} API key is already saved on this server.`;
+    } else {
+      el("aiSettingsStatus").textContent = `No ${label} API key saved yet — add one below to use it.`;
+    }
+  }
+}
+
+el("aiProviderSelect").addEventListener("change", (e) => {
+  toggleCustomFields(e.target.value === "__custom__");
+  el("aiApiKey").value = "";
+  refreshFieldsForSelectedProvider();
+});
+
+el("aiCustomProviderName").addEventListener("input", refreshFieldsForSelectedProvider);
 
 async function loadAiSettings() {
   try {
@@ -65,13 +173,16 @@ async function loadAiSettings() {
     if (!res.ok) return null;
     const data = await res.json();
 
-    el("aiProviderGemini").checked = data.provider !== "claude";
-    el("aiProviderClaude").checked = data.provider === "claude";
-    el("aiModel").value = data.model || "";
+    knownProviders = data.known_providers || {};
+    configuredProviders = data.configured_providers || {};
+    populateAiProviderSelect(data.provider);
 
-    el("aiSettingsStatus").textContent = data.has_key
-      ? `A ${data.provider === "claude" ? "Claude" : "Gemini"} API key is already saved on this server.`
-      : "No API key saved yet — the chatbot won't be able to answer until one is added.";
+    if (Object.prototype.hasOwnProperty.call(knownProviders, data.provider) === false) {
+      el("aiApiStyle").value = data.api_style || "openai";
+      el("aiBaseUrl").value = data.base_url || "";
+    }
+
+    refreshFieldsForSelectedProvider();
 
     return data;
   } catch (e) {
@@ -95,12 +206,26 @@ el("closeAiSettingsBtn").addEventListener("click", closeAiSettings);
 
 el("saveAiSettingsBtn").addEventListener("click", async () => {
   clearError("aiSettingsError");
-  const provider = el("aiProviderClaude").checked ? "claude" : "gemini";
+
+  const selected = el("aiProviderSelect").value;
+  const isCustom = selected === "__custom__";
+  const provider = isCustom ? el("aiCustomProviderName").value.trim().toLowerCase() : selected;
   const apiKey = el("aiApiKey").value.trim();
   const model = el("aiModel").value.trim();
+  const apiStyle = isCustom ? el("aiApiStyle").value : null;
+  const baseUrl = isCustom ? el("aiBaseUrl").value.trim() : null;
 
-  if (!apiKey) {
-    showError("aiSettingsError", "Please enter an API key.");
+  if (isCustom && !provider) {
+    showError("aiSettingsError", "Please enter a name for the custom provider (e.g. groq, ollama).");
+    return;
+  }
+  if (isCustom && apiStyle === "openai" && !baseUrl) {
+    showError("aiSettingsError", "Please enter a base URL for this custom provider.");
+    return;
+  }
+  const alreadyLinked = configuredProviders[provider] && configuredProviders[provider].has_oauth;
+  if (!apiKey && !alreadyLinked) {
+    showError("aiSettingsError", "Please enter an API key, or use \"Sign in with " + (knownProviders[provider]?.label || provider) + "\" above.");
     return;
   }
 
@@ -108,7 +233,13 @@ el("saveAiSettingsBtn").addEventListener("click", async () => {
     const res = await fetch(`${API_BASE}/api/settings/ai`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ provider, api_key: apiKey, model: model || null }),
+      body: JSON.stringify({
+        provider,
+        api_key: apiKey,
+        model: model || null,
+        api_style: apiStyle,
+        base_url: baseUrl || null,
+      }),
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
@@ -120,6 +251,110 @@ el("saveAiSettingsBtn").addEventListener("click", async () => {
     closeAiSettings();
   } catch (e) {
     showError("aiSettingsError", "Could not reach the server.");
+  }
+});
+
+// ---------------------------------------------------------------------
+// OAuth account linking (Sign in with Google / Anthropic / OpenAI) -
+// the buttons exist in index.html and get their text/visibility set by
+// refreshFieldsForSelectedProvider() above, but they had no click
+// behavior wired up yet. This block adds that.
+// ---------------------------------------------------------------------
+
+// Opens the provider's login page (real Google OAuth, or the
+// mock_login.html simulation if no Client ID/Secret is configured) in a
+// popup window, then polls until the popup closes and refreshes the AI
+// settings so the "Linked via OAuth" badge shows up immediately.
+el("aiOAuthBtn").addEventListener("click", () => {
+  const provider = el("aiProviderSelect").value;
+  if (!provider || provider === "__custom__") return;
+
+  const popup = window.open(
+    `${API_BASE}/api/auth/${provider}/login`,
+    "oauthLogin",
+    "width=480,height=680"
+  );
+
+  if (!popup) {
+    showError("aiSettingsError", "Popup was blocked - please allow popups for this site and try again.");
+    return;
+  }
+
+  const pollTimer = setInterval(async () => {
+    if (popup.closed) {
+      clearInterval(pollTimer);
+      await loadAiSettings();
+    }
+  }, 500);
+});
+
+el("oauthUnlinkBtn").addEventListener("click", async () => {
+  const provider = el("aiProviderSelect").value;
+  if (!provider || provider === "__custom__") return;
+
+  try {
+    const res = await fetch(`${API_BASE}/api/auth/${provider}/unlink`, { method: "POST" });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      showError("aiSettingsError", err.detail || `Could not unlink (${res.status}).`);
+      return;
+    }
+    await loadAiSettings();
+  } catch (e) {
+    showError("aiSettingsError", "Could not reach the server.");
+  }
+});
+
+// "OAuth Developer Settings" expandable section - lets Sir paste in a
+// real Google Client ID/Secret. Left blank, the app just falls back to
+// mock_login.html simulation mode (see aiOAuthBtn above).
+el("toggleOAuthConfigBtn").addEventListener("click", () => {
+  el("oauthConfigSection").classList.toggle("hidden");
+  if (!el("oauthConfigSection").classList.contains("hidden")) {
+    loadOAuthConfig();
+  }
+});
+
+async function loadOAuthConfig() {
+  try {
+    const res = await fetch(`${API_BASE}/api/auth/config`);
+    if (!res.ok) return;
+    const data = await res.json();
+    el("googleClientId").value = data.google_client_id || "";
+    el("googleClientSecret").value = "";
+    el("googleClientSecret").placeholder = data.has_google_secret
+      ? "Google Client Secret (already saved - leave blank to keep it)"
+      : "Google Client Secret";
+    el("oauthConfigStatus").textContent = data.is_demo_mode
+      ? "Currently running in simulation/demo mode."
+      : "Real Google OAuth is configured.";
+  } catch (e) {
+    // silent - this is a secondary, expandable section
+  }
+}
+
+el("saveOAuthConfigBtn").addEventListener("click", async () => {
+  const clientId = el("googleClientId").value.trim();
+  const clientSecret = el("googleClientSecret").value.trim();
+
+  try {
+    const res = await fetch(`${API_BASE}/api/auth/config`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        google_client_id: clientId || null,
+        google_client_secret: clientSecret || null,
+      }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      el("oauthConfigStatus").textContent = err.detail || `Could not save (${res.status}).`;
+      return;
+    }
+    el("googleClientSecret").value = "";
+    await loadOAuthConfig();
+  } catch (e) {
+    el("oauthConfigStatus").textContent = "Could not reach the server.";
   }
 });
 
@@ -619,6 +854,18 @@ async function sendMessage(message) {
   conversationHistory.push({ role: "user", text: message });
   saveCurrentChat();
 
+  // Show a "Searching..." placeholder immediately, and disable Send so
+  // the user gets instant feedback instead of wondering if the click
+  // registered - this doesn't make the AI itself faster, but the wait
+  // no longer feels broken/stuck.
+  const sendBtn = el("chatForm").querySelector("button[type=submit]");
+  const loadingWrap = document.createElement("div");
+  loadingWrap.className = "msg bot loading-msg";
+  loadingWrap.innerHTML = `<span class="typing-dots"><span></span><span></span><span></span></span> Searching...`;
+  el("messages").appendChild(loadingWrap);
+  el("messages").scrollTop = el("messages").scrollHeight;
+  if (sendBtn) sendBtn.disabled = true;
+
   try {
     const res = await fetch(`${API_BASE}/api/chat`, {
       method: "POST",
@@ -661,6 +908,9 @@ async function sendMessage(message) {
     saveCurrentChat();
   } catch (err) {
     appendMessage("Something went wrong reaching the server. (network/parse error)", "bot");
+  } finally {
+    loadingWrap.remove();
+    if (sendBtn) sendBtn.disabled = false;
   }
 }
 

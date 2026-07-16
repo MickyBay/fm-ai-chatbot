@@ -137,6 +137,70 @@ try:
         print(r.status_code, r.json())
         assert r.status_code == 200, "a single DB failing must NOT take down the whole /api/chat call"
 
+    print("\n== 6. Test AI Provider settings endpoints (GET /api/settings/ai, POST /api/settings/ai) ==")
+    r = client.get("/api/settings/ai")
+    print(r.status_code, r.json())
+    assert r.json()["provider"] == "gemini"
+    assert r.json()["has_key"] is True
+
+    # Save a custom OpenAI-style provider
+    r = client.post("/api/settings/ai", json={
+        "provider": "my-custom-groq",
+        "api_key": "MOCK_GROQ_KEY",
+        "model": "llama-3-8b",
+        "api_style": "openai",
+        "base_url": "https://api.groq.com/openai/v1"
+    })
+    print(r.status_code, r.json())
+    assert r.status_code == 200
+
+    print("\n== 7. Test /api/chat with api_style: 'openai' ==")
+    # Verify the current provider switched
+    r = client.get("/api/settings/ai")
+    assert r.json()["provider"] == "my-custom-groq"
+
+    openai_call_count = {"n": 0}
+
+    async def fake_call_openai_compatible(messages, cfg, provider_key):
+        openai_call_count["n"] += 1
+        assert provider_key == "my-custom-groq"
+        if openai_call_count["n"] == 1:
+            return {
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [{
+                            "id": "call_123",
+                            "type": "function",
+                            "function": {
+                                "name": "get_records",
+                                "arguments": '{"limit": 20}'
+                            }
+                        }]
+                    }
+                }]
+            }
+        tool_msg = messages[-1]
+        assert tool_msg["role"] == "tool"
+        assert tool_msg["tool_call_id"] == "call_123"
+        assert "LaundryPOS" in tool_msg["content"]
+        return {
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "Custom Groq Response: LaundryPOS=0, TAILORINGDEV=1500"
+                }
+            }]
+        }
+
+    with patch.object(main.FileMakerClient, "get_records", new=fake_get_records), \
+         patch("main.call_openai_compatible", new=fake_call_openai_compatible):
+        r = client.post("/api/chat", json={"message": "what are the balances?", "history": []})
+        print(r.status_code, r.json())
+        assert r.status_code == 200
+        assert openai_call_count["n"] == 2
+        assert "Custom Groq Response" in r.json()["data"]
+
     print("\nALL SMOKE TESTS PASSED")
 
 finally:

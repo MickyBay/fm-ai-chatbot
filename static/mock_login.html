@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Connect Account - OAuth Authorization</title>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&family=Inter:wght@400;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-dark: #0f0c20;
+      --card-bg: rgba(255, 255, 255, 0.04);
+      --card-border: rgba(255, 255, 255, 0.08);
+      --google-blue: #4285F4;
+      --anthropic-accent: #E0B88A;
+      --openai-green: #10a37f;
+      --text-main: #ffffff;
+      --text-muted: #a5a1b8;
+    }
+
+    body {
+      margin: 0;
+      padding: 0;
+      font-family: 'Outfit', sans-serif;
+      background: radial-gradient(circle at 50% 50%, #1a153b 0%, var(--bg-dark) 100%);
+      color: var(--text-main);
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+      overflow: hidden;
+    }
+
+    /* Decorative glowing spheres */
+    .glow-sphere {
+      position: absolute;
+      width: 400px;
+      height: 400px;
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(0, 229, 255, 0.15) 0%, rgba(0, 0, 0, 0) 70%);
+      filter: blur(40px);
+      z-index: 1;
+    }
+    .sphere-1 { top: -100px; left: -100px; animation: float 12s infinite alternate; }
+    .sphere-2 { bottom: -100px; right: -100px; background: radial-gradient(circle, rgba(123, 31, 162, 0.15) 0%, rgba(0, 0, 0, 0) 70%); animation: float 15s infinite alternate-reverse; }
+
+    @keyframes float {
+      0% { transform: translate(0, 0) scale(1); }
+      100% { transform: translate(50px, 30px) scale(1.1); }
+    }
+
+    .container {
+      position: relative;
+      z-index: 10;
+      width: 100%;
+      max-width: 450px;
+      padding: 20px;
+      box-sizing: border-box;
+    }
+
+    .glass-card {
+      background: var(--card-bg);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border: 1px solid var(--card-border);
+      border-radius: 24px;
+      padding: 40px 30px;
+      box-shadow: 0 20px 50px rgba(0, 0, 0, 0.4);
+      text-align: center;
+      transition: all 0.3s ease;
+    }
+
+    .logo-container {
+      width: 80px;
+      height: 80px;
+      margin: 0 auto 24px;
+      border-radius: 20px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 32px;
+      box-shadow: 0 10px 25px rgba(0, 0, 0, 0.2);
+    }
+
+    /* Google styling */
+    .logo-google {
+      background: rgba(66, 133, 244, 0.1);
+      border: 1px solid rgba(66, 133, 244, 0.2);
+      color: var(--google-blue);
+    }
+    /* Claude styling */
+    .logo-claude {
+      background: rgba(224, 184, 138, 0.1);
+      border: 1px solid rgba(224, 184, 138, 0.2);
+      color: var(--anthropic-accent);
+    }
+    /* OpenAI styling */
+    .logo-openai {
+      background: rgba(16, 163, 127, 0.1);
+      border: 1px solid rgba(16, 163, 127, 0.2);
+      color: var(--openai-green);
+    }
+
+    h2 {
+      margin: 0 0 10px;
+      font-size: 26px;
+      font-weight: 800;
+      letter-spacing: -0.5px;
+    }
+
+    .provider-title {
+      font-weight: 600;
+    }
+
+    p.subtitle {
+      font-size: 15px;
+      color: var(--text-muted);
+      line-height: 1.5;
+      margin: 0 0 32px;
+    }
+
+    .form-group {
+      text-align: left;
+      margin-bottom: 20px;
+    }
+
+    label {
+      display: block;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-muted);
+      margin-bottom: 8px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+
+    input {
+      width: 100%;
+      padding: 14px 16px;
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      color: var(--text-main);
+      font-size: 15px;
+      font-family: 'Inter', sans-serif;
+      box-sizing: border-box;
+      transition: all 0.3s ease;
+    }
+
+    input:focus {
+      outline: none;
+      border-color: rgba(255, 255, 255, 0.25);
+      background: rgba(255, 255, 255, 0.06);
+      box-shadow: 0 0 15px rgba(255, 255, 255, 0.05);
+    }
+
+    .scope-box {
+      background: rgba(255, 255, 255, 0.02);
+      border: 1px solid rgba(255, 255, 255, 0.05);
+      border-radius: 14px;
+      padding: 16px;
+      text-align: left;
+      font-size: 13px;
+      color: var(--text-muted);
+      margin-bottom: 32px;
+      line-height: 1.5;
+    }
+
+    .scope-item {
+      display: flex;
+      align-items: flex-start;
+      margin-bottom: 8px;
+    }
+    .scope-item:last-child { margin-bottom: 0; }
+
+    .scope-check {
+      color: #00e5ff;
+      margin-right: 8px;
+      font-weight: bold;
+    }
+
+    .btn-login {
+      width: 100%;
+      padding: 16px;
+      border-radius: 30px;
+      border: none;
+      color: white;
+      font-size: 16px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.3s ease;
+      font-family: 'Outfit', sans-serif;
+      box-shadow: 0 10px 20px rgba(0, 0, 0, 0.2);
+    }
+
+    .btn-google {
+      background: linear-gradient(135deg, var(--google-blue), #1a73e8);
+    }
+    .btn-google:hover {
+      box-shadow: 0 10px 25px rgba(66, 133, 244, 0.4);
+      transform: translateY(-2px);
+    }
+
+    .btn-claude {
+      background: linear-gradient(135deg, var(--anthropic-accent), #cf9f6b);
+      color: #1e1305;
+      font-weight: 800;
+    }
+    .btn-claude:hover {
+      box-shadow: 0 10px 25px rgba(224, 184, 138, 0.4);
+      transform: translateY(-2px);
+    }
+
+    .btn-openai {
+      background: linear-gradient(135deg, var(--openai-green), #0e8568);
+    }
+    .btn-openai:hover {
+      box-shadow: 0 10px 25px rgba(16, 163, 127, 0.4);
+      transform: translateY(-2px);
+    }
+
+    .footer {
+      margin-top: 24px;
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+
+    .secure-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: rgba(0, 229, 255, 0.05);
+      border: 1px solid rgba(0, 229, 255, 0.12);
+      padding: 6px 12px;
+      border-radius: 20px;
+      color: #00e5ff;
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+  </style>
+</head>
+<body>
+  <div class="glow-sphere sphere-1"></div>
+  <div class="glow-sphere sphere-2"></div>
+
+  <div class="container">
+    <div class="glass-card">
+      <div id="providerLogo" class="logo-container">G</div>
+      
+      <h2>Authorize <span id="providerDisplay" class="provider-title">Google</span></h2>
+      <p class="subtitle">Grant FileMaker AI Chatbot permission to access your model generation endpoints.</p>
+
+      <form id="loginForm" onsubmit="handleAuth(event)">
+        <div class="form-group">
+          <label for="emailInput">Account Email</label>
+          <input type="email" id="emailInput" placeholder="name@domain.com" required value="demo@filemakerchatbot.local">
+        </div>
+
+        <div class="scope-box">
+          <label style="margin-bottom: 10px; display: block; font-size: 11px;">Permissions requested:</label>
+          <div class="scope-item">
+            <span class="scope-check">✓</span>
+            <span>Access model deployment configurations</span>
+          </div>
+          <div class="scope-item">
+            <span class="scope-check">✓</span>
+            <span>Generate text, complete code, and call tools</span>
+          </div>
+          <div class="scope-item">
+            <span class="scope-check">✓</span>
+            <span>silently refresh short-lived access tokens</span>
+          </div>
+        </div>
+
+        <button type="submit" id="authButton" class="btn-login btn-google">Connect Account</button>
+      </form>
+
+      <div class="footer">
+        <div class="secure-badge">
+          🛡️ Simulated OAuth Consent
+        </div>
+        <p style="margin-top: 16px; margin-bottom: 0;">This window simulates a secure OAuth login to allow testing without keys.</p>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // Get query params
+    const urlParams = new URLSearchParams(window.location.search);
+    const provider = (urlParams.get('provider') || 'gemini').toLowerCase();
+
+    // UI Configuration based on provider
+    const logoEl = document.getElementById('providerLogo');
+    const displayEl = document.getElementById('providerDisplay');
+    const btnEl = document.getElementById('authButton');
+
+    if (provider === 'gemini') {
+      logoEl.className = 'logo-container logo-google';
+      logoEl.textContent = 'G';
+      displayEl.textContent = 'Google Gemini';
+      btnEl.className = 'btn-login btn-google';
+      btnEl.textContent = 'Allow Google Authorization';
+    } else if (provider === 'claude') {
+      logoEl.className = 'logo-container logo-claude';
+      logoEl.textContent = 'A';
+      displayEl.textContent = 'Anthropic Claude';
+      btnEl.className = 'btn-login btn-claude';
+      btnEl.textContent = 'Allow Anthropic Authorization';
+    } else {
+      logoEl.className = 'logo-container logo-openai';
+      logoEl.textContent = 'O';
+      displayEl.textContent = 'OpenAI';
+      btnEl.className = 'btn-login btn-openai';
+      btnEl.textContent = 'Allow OpenAI Authorization';
+    }
+
+    function handleAuth(event) {
+      event.preventDefault();
+      
+      // Generate a mock code
+      const mockCode = 'mock_code_' + Math.random().toString(36).substring(2, 15);
+      
+      // Redirect back to our callback route
+      window.location.href = `/api/auth/${provider}/callback?code=${mockCode}`;
+    }
+  </script>
+</body>
+</html>

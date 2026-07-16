@@ -31,9 +31,11 @@ import time
 import webbrowser
 from pathlib import Path
 from typing import Optional
+from cryptography.fernet import Fernet
 
 import httpx
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -61,6 +63,31 @@ APP_DIR = Path.home() / "AppData" / "Local" / "FileMaker-AI-Chatbot"
 APP_DIR.mkdir(parents=True, exist_ok=True)
 
 CONFIG_PATH = APP_DIR / "config.json"
+SECRET_KEY_PATH = APP_DIR / "secret.key"
+
+def get_encryption_key() -> bytes:
+    if not SECRET_KEY_PATH.exists():
+        key = Fernet.generate_key()
+        SECRET_KEY_PATH.write_bytes(key)
+        return key
+    return SECRET_KEY_PATH.read_bytes()
+
+def encrypt_value(val: str) -> str:
+    if not val:
+        return ""
+    key = get_encryption_key()
+    f = Fernet(key)
+    return f.encrypt(val.encode()).decode()
+
+def decrypt_value(val: str) -> str:
+    if not val:
+        return ""
+    key = get_encryption_key()
+    f = Fernet(key)
+    try:
+        return f.decrypt(val.encode()).decode()
+    except Exception:
+        return val
 
 app = FastAPI(title="fm-ai-chatbot")
 
@@ -74,6 +101,44 @@ app.add_middleware(
 
 DEFAULT_GEMINI_MODEL = "gemini-3.5-flash"
 DEFAULT_CLAUDE_MODEL = "claude-sonnet-4-6"
+
+# ---------------------------------------------------------------------------
+# AI provider registry - Sohaib wants ANY provider to be selectable, not
+# just Gemini/Claude hardcoded. This list is just a set of convenient
+# presets (so the frontend can offer a one-click dropdown with sane
+# defaults) - it is NOT a whitelist. A user can also type in any other
+# provider name (DeepSeek, Groq, a local model server, etc.) and supply
+# their own base_url - see /api/settings/ai below. Almost every
+# third-party LLM API today speaks the same "OpenAI-compatible" chat-
+# completions + tools wire format, so that's the default api_style for
+# anything not explicitly listed here.
+# ---------------------------------------------------------------------------
+PROVIDER_REGISTRY = {
+    "gemini": {
+        "label": "Google Gemini",
+        "api_style": "gemini",
+        "default_model": DEFAULT_GEMINI_MODEL,
+        "base_url": None,  # call_gemini() builds the Google endpoint itself
+    },
+    "claude": {
+        "label": "Anthropic Claude",
+        "api_style": "claude",
+        "default_model": DEFAULT_CLAUDE_MODEL,
+        "base_url": None,  # call_claude() builds the Anthropic endpoint itself
+    },
+    "deepseek": {
+        "label": "DeepSeek",
+        "api_style": "openai",
+        "default_model": "deepseek-chat",
+        "base_url": "https://api.deepseek.com/v1",
+    },
+    "openai": {
+        "label": "OpenAI",
+        "api_style": "openai",
+        "default_model": "gpt-4o-mini",
+        "base_url": "https://api.openai.com/v1",
+    },
+}
 
 
 # ---------------------------------------------------------------------------
@@ -148,23 +213,48 @@ def load_config() -> dict:
         cfg["ai"] = {
             "provider": "gemini",
             "daily_request_limit": old_gemini.get("daily_request_limit", 20),
-            "gemini": {
-                "api_key": old_gemini.get("api_key", ""),
-                "model": old_gemini.get("model", DEFAULT_GEMINI_MODEL),
-            },
-            "claude": {
-                "api_key": "",
-                "model": DEFAULT_CLAUDE_MODEL,
+            "providers": {
+                "gemini": {
+                    "api_key": old_gemini.get("api_key", ""),
+                    "model": old_gemini.get("model", DEFAULT_GEMINI_MODEL),
+                    "api_style": "gemini",
+                    "base_url": None,
+                },
             },
         }
         cfg.pop("gemini", None)
 
     cfg["ai"].setdefault("provider", "gemini")
     cfg["ai"].setdefault("daily_request_limit", 20)
-    cfg["ai"].setdefault("gemini", {"api_key": "", "model": DEFAULT_GEMINI_MODEL})
-    cfg["ai"].setdefault("claude", {"api_key": "", "model": DEFAULT_CLAUDE_MODEL})
-    cfg["ai"]["gemini"].setdefault("model", DEFAULT_GEMINI_MODEL)
-    cfg["ai"]["claude"].setdefault("model", DEFAULT_CLAUDE_MODEL)
+    cfg["ai"].setdefault("providers", {})
+
+    # --- Migration: old fixed "ai.gemini" / "ai.claude" blocks -> the new
+    # open-ended "ai.providers.<any-name>" dict. This is the actual fix for
+    # Sohaib's "why is this hardcoded to gemini/claude?" complaint - any
+    # provider name can now live in this dict, not just these two. ---
+    for legacy_key in ("gemini", "claude"):
+        if legacy_key in cfg["ai"]:
+            legacy_cfg = cfg["ai"].pop(legacy_key) or {}
+            cfg["ai"]["providers"].setdefault(legacy_key, {
+                "api_key": legacy_cfg.get("api_key", ""),
+                "model": legacy_cfg.get("model") or PROVIDER_REGISTRY[legacy_key]["default_model"],
+                "api_style": legacy_key,
+                "base_url": None,
+            })
+
+    # Keep gemini/claude present as ready-to-use options even if never
+    # configured yet, so the AI Settings dropdown always has them without
+    # a special case in the frontend.
+    for key in ("gemini", "claude"):
+        cfg["ai"]["providers"].setdefault(key, {
+            "api_key": "",
+            "model": PROVIDER_REGISTRY[key]["default_model"],
+            "api_style": key,
+            "base_url": None,
+        })
+        cfg["ai"]["providers"][key].setdefault("model", PROVIDER_REGISTRY[key]["default_model"])
+        cfg["ai"]["providers"][key].setdefault("api_style", key)
+        cfg["ai"]["providers"][key].setdefault("base_url", None)
 
     return cfg
 
@@ -308,6 +398,15 @@ class FileMakerClient:
         self.password = profile["password"]
         self.verify_ssl = profile.get("verify_ssl", True)
         self.token: Optional[str] = None
+        # Cache the layout list once fetched - the model often calls
+        # list_available_layouts more than once in the same conversation
+        # (or across separate chat messages, since the client itself is
+        # already reused via FM_CLIENT_CACHE). Re-fetching this from the
+        # FileMaker server every single time adds an avoidable network
+        # round-trip on top of the Gemini/Claude round-trips, which is a
+        # big part of why responses feel slow - this removes that cost
+        # after the first fetch.
+        self._layouts_cache: Optional[list[str]] = None
 
     async def _ensure_token(self):
         if not self.token:
@@ -315,7 +414,9 @@ class FileMakerClient:
 
     async def list_layouts(self) -> list[str]:
         await self._ensure_token()
-        return await fm_list_layouts(self.server_url, self.database, self.token, self.verify_ssl)
+        if self._layouts_cache is None:
+            self._layouts_cache = await fm_list_layouts(self.server_url, self.database, self.token, self.verify_ssl)
+        return self._layouts_cache
 
     async def describe_layout_schema(self, layout_name: str) -> dict:
         await self._ensure_token()
@@ -451,6 +552,26 @@ class FileMakerClient:
                 resp = await client.delete(url, headers=headers)
             resp.raise_for_status()
             return {"status": "deleted", "deleted_record": matches[0]["fieldData"]}
+
+
+FM_CLIENT_CACHE = {}
+
+def get_fm_client(profile_key: str, profile: dict) -> FileMakerClient:
+    """
+    Caches and retrieves FileMakerClient instances to reuse session login tokens,
+    preventing slow duplicate login requests on every chat turn.
+    """
+    cache_key = (
+        profile_key,
+        profile.get("server_url"),
+        profile.get("database"),
+        profile.get("username"),
+        profile.get("password"),
+        profile.get("verify_ssl", True)
+    )
+    if cache_key not in FM_CLIENT_CACHE:
+        FM_CLIENT_CACHE[cache_key] = FileMakerClient(profile)
+    return FM_CLIENT_CACHE[cache_key]
 
 
 # ---------------------------------------------------------------------------
@@ -606,6 +727,24 @@ def _gemini_tools_to_claude_tools() -> list:
 
 CLAUDE_TOOLS = _gemini_tools_to_claude_tools()
 
+
+def _gemini_tools_to_openai_tools() -> list:
+    """OpenAI-compatible chat-completions tool format (used by OpenAI
+    itself, DeepSeek, and most other third-party providers) - derived
+    once from the same source as the other two, same reasoning as
+    _gemini_tools_to_claude_tools() above."""
+    fdecls = GEMINI_TOOLS[0]["function_declarations"]
+    return [
+        {
+            "type": "function",
+            "function": {"name": fd["name"], "description": fd["description"], "parameters": fd["parameters"]},
+        }
+        for fd in fdecls
+    ]
+
+
+OPENAI_TOOLS = _gemini_tools_to_openai_tools()
+
 SYSTEM_INSTRUCTIONS = """
 You are a helpful assistant that answers questions about the user's
 currently active FileMaker database(s). One or MORE databases may be
@@ -628,6 +767,21 @@ HANDLING MULTIPLE DATABASES:
   TAILORINGDEV it is 1500.").
 - If NO active database has matching data, say so plainly, e.g. "No
   matching records were found in any of the active databases."
+- NEVER merge records from different databases into a single combined
+  table, especially when their fields/columns are different (e.g.
+  LaundryPOS "Transaction #, Status, Subtotal, VAT, Total" vs
+  TailoringDBDev "Invoice #, Book #, Customer Name, Balance Amount").
+  Doing so produces a confusing table with mismatched columns and a
+  repeated header in the middle. Instead, give each database its OWN
+  heading and its OWN separate table, e.g.:
+    **LaundryPOS - Transactions**
+    | Transaction # | Date | Status | ... |
+    ...
+    **TailoringDBDev - Invoices**
+    | Invoice # | Book # | Customer Name | ... |
+    ...
+  Only combine into one shared table when every database's records have
+  the SAME columns/fields for that question.
 
 IMPORTANT - YOU CAN ANALYZE DATA YOURSELF:
 Your tools (get_records, find_records) only fetch raw data - they do not
@@ -767,11 +921,104 @@ WRITE OPERATIONS (create_record, update_record, delete_record) - SAFETY RULES:
 """
 
 
-async def call_gemini(contents: list, cfg: dict, max_retries: int = 2) -> dict:
-    provider_cfg = cfg["ai"]["gemini"]
-    api_key = provider_cfg["api_key"]
+async def refresh_oauth_token(provider: str, refresh_token: str) -> dict:
+    cfg = load_config()
+    oauth_cfg = cfg.get("oauth", {})
+
+    if refresh_token.startswith("mock_"):
+        return {
+            "access_token": f"mock_access_{int(time.time())}",
+            "refresh_token": refresh_token,
+            "expires_in": 3600
+        }
+
+    if provider == "gemini":
+        client_id = oauth_cfg.get("google_client_id")
+        client_secret_enc = oauth_cfg.get("google_client_secret")
+        if not client_id or not client_secret_enc:
+            raise Exception("Google client credentials not configured.")
+
+        client_secret = decrypt_value(client_secret_enc)
+
+        url = "https://oauth2.googleapis.com/token"
+        payload = {
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "refresh_token": refresh_token,
+            "grant_type": "refresh_token"
+        }
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(url, data=payload)
+            resp.raise_for_status()
+            data = resp.json()
+            return {
+                "access_token": data["access_token"],
+                "refresh_token": data.get("refresh_token") or refresh_token,
+                "expires_in": data.get("expires_in", 3600)
+            }
+
+    return {
+        "access_token": f"mock_access_{int(time.time())}",
+        "refresh_token": refresh_token,
+        "expires_in": 3600
+    }
+
+
+async def get_valid_oauth_token(cfg: dict, provider: str) -> Optional[str]:
+    providers = cfg.get("ai", {}).get("providers", {})
+    provider_cfg = providers.get(provider, {})
+    oauth_tokens = provider_cfg.get("oauth_tokens")
+    if not oauth_tokens:
+        return None
+
+    access_token_enc = oauth_tokens.get("access_token")
+    refresh_token_enc = oauth_tokens.get("refresh_token")
+    expires_at = oauth_tokens.get("expires_at")
+
+    if not access_token_enc:
+        return None
+
+    access_token = decrypt_value(access_token_enc)
+
+    current_time = int(time.time())
+    if expires_at and current_time < expires_at - 30:
+        return access_token
+
+    if not refresh_token_enc:
+        return None
+
+    refresh_token = decrypt_value(refresh_token_enc)
+
+    try:
+        new_tokens = await refresh_oauth_token(provider, refresh_token)
+        if new_tokens:
+            cfg["ai"]["providers"][provider]["oauth_tokens"] = {
+                "access_token": encrypt_value(new_tokens["access_token"]),
+                "refresh_token": encrypt_value(new_tokens.get("refresh_token") or refresh_token),
+                "expires_at": int(time.time()) + int(new_tokens.get("expires_in", 3600))
+            }
+            save_config(cfg)
+            return new_tokens["access_token"]
+    except Exception as e:
+        print(f"Error refreshing OAuth token for {provider}: {e}")
+
+    return None
+
+
+async def call_gemini(contents: list, cfg: dict, provider_key: str = "gemini", max_retries: int = 2) -> dict:
+    provider_cfg = cfg["ai"]["providers"][provider_key]
     model = provider_cfg.get("model") or DEFAULT_GEMINI_MODEL
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+
+    headers = {}
+    access_token = await get_valid_oauth_token(cfg, provider_key)
+    if access_token:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        headers["Authorization"] = f"Bearer {access_token}"
+    else:
+        api_key = provider_cfg.get("api_key")
+        if not api_key:
+            raise HTTPException(status_code=400, detail="No API key or OAuth account linked for Gemini.")
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
 
     body = {
         "contents": contents,
@@ -783,7 +1030,7 @@ async def call_gemini(contents: list, cfg: dict, max_retries: int = 2) -> dict:
     for attempt in range(max_retries + 1):
         try:
             async with httpx.AsyncClient(timeout=60) as client:
-                resp = await client.post(url, json=body)
+                resp = await client.post(url, headers=headers, json=body)
         except httpx.RequestError as e:
             # Connection drops / timeouts are common when Google's servers
             # are under heavy load - retry with backoff instead of failing
@@ -807,16 +1054,22 @@ async def call_gemini(contents: list, cfg: dict, max_retries: int = 2) -> dict:
     last_error.raise_for_status()  # exhausted retries - raise the last error
 
 
-async def call_claude(messages: list, cfg: dict, max_retries: int = 2) -> dict:
-    provider_cfg = cfg["ai"]["claude"]
-    api_key = provider_cfg["api_key"]
+async def call_claude(messages: list, cfg: dict, provider_key: str = "claude", max_retries: int = 2) -> dict:
+    provider_cfg = cfg["ai"]["providers"][provider_key]
     model = provider_cfg.get("model") or DEFAULT_CLAUDE_MODEL
     url = "https://api.anthropic.com/v1/messages"
     headers = {
-        "x-api-key": api_key,
         "anthropic-version": "2023-06-01",
         "content-type": "application/json",
     }
+    access_token = await get_valid_oauth_token(cfg, provider_key)
+    if access_token:
+        headers["Authorization"] = f"Bearer {access_token}"
+    else:
+        api_key = provider_cfg.get("api_key")
+        if not api_key:
+            raise HTTPException(status_code=400, detail="No API key or OAuth account linked for Claude.")
+        headers["x-api-key"] = api_key
     body = {
         "model": model,
         "max_tokens": 4096,
@@ -824,6 +1077,55 @@ async def call_claude(messages: list, cfg: dict, max_retries: int = 2) -> dict:
         "tools": CLAUDE_TOOLS,
         "messages": messages,
     }
+
+    last_error = None
+    for attempt in range(max_retries + 1):
+        try:
+            async with httpx.AsyncClient(timeout=60) as client:
+                resp = await client.post(url, headers=headers, json=body)
+        except httpx.RequestError as e:
+            if attempt < max_retries:
+                await asyncio.sleep(2 * (attempt + 1))
+                continue
+            raise
+
+        if resp.status_code in (503, 429) and attempt < max_retries:
+            last_error = resp
+            await asyncio.sleep(2 * (attempt + 1))
+            continue
+
+        resp.raise_for_status()
+        return resp.json()
+
+    last_error.raise_for_status()
+
+
+async def call_openai_compatible(messages: list, cfg: dict, provider_key: str, max_retries: int = 2) -> dict:
+    """
+    Works for DeepSeek, OpenAI itself, and any "anything" provider Sohaib
+    wants to plug in (Groq, a local Ollama/vLLM server, etc.) - almost
+    all of them implement the same OpenAI-style /chat/completions +
+    tools wire format, so one function covers all of them. Which exact
+    server to hit comes from provider_cfg["base_url"] (or the registry
+    preset), never hardcoded here.
+    """
+    provider_cfg = cfg["ai"]["providers"][provider_key]
+    model = provider_cfg.get("model")
+    base_url = (provider_cfg.get("base_url") or PROVIDER_REGISTRY.get(provider_key, {}).get("base_url") or "").rstrip("/")
+    if not base_url:
+        raise HTTPException(status_code=500, detail=f"No base_url configured for provider '{provider_key}'.")
+    url = f"{base_url}/chat/completions"
+
+    access_token = await get_valid_oauth_token(cfg, provider_key)
+    if access_token:
+        headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
+    else:
+        api_key = provider_cfg.get("api_key")
+        if not api_key:
+            raise HTTPException(status_code=400, detail=f"No API key or OAuth account linked for {provider_key}.")
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+
+    body = {"model": model, "messages": messages, "tools": OPENAI_TOOLS, "tool_choice": "auto"}
 
     last_error = None
     for attempt in range(max_retries + 1):
@@ -895,7 +1197,7 @@ async def run_tool_across_databases(active: list, name: str, args: dict) -> list
     return await asyncio.gather(*tasks)
 
 
-async def run_chat_loop(cfg: dict, active: list, contents: list, max_turns: int = 8) -> str:
+async def run_chat_loop(cfg: dict, active: list, contents: list, provider_key: str = "gemini", max_turns: int = 8) -> str:
     """
     Gemini version of the tool-calling loop: send the conversation to
     Gemini, execute any tool it asks for (against every active database),
@@ -907,7 +1209,7 @@ async def run_chat_loop(cfg: dict, active: list, contents: list, max_turns: int 
     """
     for _ in range(max_turns):
         try:
-            gemini_response = await call_gemini(contents, cfg)
+            gemini_response = await call_gemini(contents, cfg, provider_key)
         except KeyError as e:
             raise HTTPException(status_code=500, detail=f"config.json is missing key: {e}")
         except httpx.HTTPStatusError as e:
@@ -978,7 +1280,7 @@ async def run_chat_loop(cfg: dict, active: list, contents: list, max_turns: int 
     return "Sorry, I couldn't get a final answer within the allowed steps."
 
 
-async def run_chat_loop_claude(cfg: dict, active: list, messages: list, max_turns: int = 8) -> str:
+async def run_chat_loop_claude(cfg: dict, active: list, messages: list, provider_key: str = "claude", max_turns: int = 8) -> str:
     """
     Claude version of the same tool-calling loop as run_chat_loop, using
     the Anthropic Messages API's tool_use / tool_result blocks instead of
@@ -986,7 +1288,7 @@ async def run_chat_loop_claude(cfg: dict, active: list, messages: list, max_turn
     """
     for _ in range(max_turns):
         try:
-            claude_response = await call_claude(messages, cfg)
+            claude_response = await call_claude(messages, cfg, provider_key)
         except KeyError as e:
             raise HTTPException(status_code=500, detail=f"config.json is missing key: {e}")
         except httpx.HTTPStatusError as e:
@@ -1030,6 +1332,53 @@ async def run_chat_loop_claude(cfg: dict, active: list, messages: list, max_turn
     return "Sorry, I couldn't get a final answer within the allowed steps."
 
 
+async def run_chat_loop_openai(cfg: dict, active: list, messages: list, provider_key: str, max_turns: int = 8) -> str:
+    """
+    Same tool-calling loop again, this time for the OpenAI-compatible wire
+    format (DeepSeek, OpenAI, or any custom "anything" provider Sohaib
+    wants to add) - uses choices[0].message.tool_calls / role:"tool"
+    messages instead of Gemini's or Claude's own conventions.
+    """
+    for _ in range(max_turns):
+        try:
+            response = await call_openai_compatible(messages, cfg, provider_key)
+        except KeyError as e:
+            raise HTTPException(status_code=500, detail=f"config.json is missing key: {e}")
+        except httpx.HTTPStatusError as e:
+            raise HTTPException(
+                status_code=502,
+                detail=f"{provider_key.title()} API rejected the request ({e.response.status_code}): {e.response.text[:300]}",
+            )
+        except httpx.RequestError:
+            raise HTTPException(status_code=502, detail=f"Could not reach the {provider_key.title()} API. Check your internet connection.")
+
+        choices = response.get("choices", [])
+        if not choices:
+            return "Sorry, I couldn't process that request (no choices returned)."
+
+        message = choices[0].get("message", {})
+        tool_calls = message.get("tool_calls") or []
+
+        if not tool_calls:
+            return message.get("content") or "Sorry, I couldn't process that request."
+
+        # The assistant turn that requested tools must be echoed back
+        # verbatim, followed by one role:"tool" message per tool call
+        # (OpenAI-compatible convention).
+        messages.append(message)
+
+        for tc in tool_calls:
+            name = tc["function"]["name"]
+            try:
+                args = json.loads(tc["function"].get("arguments") or "{}")
+            except json.JSONDecodeError:
+                args = {}
+            result = await run_tool_across_databases(active, name, args)
+            messages.append({"role": "tool", "tool_call_id": tc["id"], "content": json.dumps(result)})
+
+    return "Sorry, I couldn't get a final answer within the allowed steps."
+
+
 # ---------------------------------------------------------------------------
 # Request models
 # ---------------------------------------------------------------------------
@@ -1061,9 +1410,11 @@ class ProfileSaveRequest(LayoutsRequest):
 
 
 class AISettingsRequest(BaseModel):
-    provider: str  # "gemini" or "claude"
-    api_key: str
+    provider: str  # any provider name - a PROVIDER_REGISTRY preset, or a custom one
+    api_key: Optional[str] = None
     model: Optional[str] = None
+    base_url: Optional[str] = None   # required for a custom (non-preset) provider
+    api_style: Optional[str] = None  # "gemini" | "claude" | "openai" - only needed for a custom provider
 
 
 # ---------------------------------------------------------------------------
@@ -1273,35 +1624,261 @@ def delete_project(key: str):
 
 @app.get("/api/settings/ai")
 def get_ai_settings():
+    """
+    Returns the currently active provider's settings, PLUS the preset
+    registry (so the frontend dropdown can offer Gemini/Claude/DeepSeek/
+    OpenAI/"Custom..." out of the box) and every provider that has
+    already been configured with a key (so switching providers in the
+    dropdown doesn't lose the others' saved keys - same behavior as
+    before, just no longer limited to exactly two providers).
+    """
     cfg = load_config()
     ai = cfg.get("ai", {})
     provider = ai.get("provider", "gemini")
-    provider_cfg = ai.get(provider, {})
+    providers_cfg = ai.get("providers", {})
+    current = providers_cfg.get(provider, {})
     return {
         "provider": provider,
-        "has_key": bool(provider_cfg.get("api_key")),
-        "model": provider_cfg.get("model", ""),
+        "has_key": bool(current.get("api_key")) or bool(current.get("oauth_tokens")),
+        "has_oauth": bool(current.get("oauth_tokens")),
+        "model": current.get("model", ""),
+        "api_style": current.get("api_style") or PROVIDER_REGISTRY.get(provider, {}).get("api_style", "openai"),
+        "base_url": current.get("base_url"),
+        "known_providers": {
+            key: {"label": v["label"], "api_style": v["api_style"], "default_model": v["default_model"]}
+            for key, v in PROVIDER_REGISTRY.items()
+        },
+        "configured_providers": {
+            key: {
+                "has_key": bool(p.get("api_key")) or bool(p.get("oauth_tokens")),
+                "model": p.get("model", ""),
+                "has_oauth": bool(p.get("oauth_tokens"))
+            }
+            for key, p in providers_cfg.items()
+        },
     }
 
 
 @app.post("/api/settings/ai")
 def save_ai_settings(req: AISettingsRequest):
     provider = req.provider.strip().lower()
-    if provider not in ("gemini", "claude"):
-        raise HTTPException(status_code=400, detail="provider must be 'gemini' or 'claude'.")
-    api_key = req.api_key.strip()
-    if not api_key:
-        raise HTTPException(status_code=400, detail="API key is required.")
+    if not provider:
+        raise HTTPException(status_code=400, detail="Provider name is required.")
 
     cfg = load_config()
+    cfg["ai"].setdefault("providers", {})
+    existing = cfg["ai"]["providers"].get(provider, {})
+
+    api_key = req.api_key.strip() if req.api_key else ""
+    if not api_key and not existing.get("api_key") and not existing.get("oauth_tokens"):
+        raise HTTPException(status_code=400, detail="API key is required.")
+
+    registry_entry = PROVIDER_REGISTRY.get(provider)
+    if registry_entry:
+        api_style = registry_entry["api_style"]
+        base_url = req.base_url.strip() if req.base_url else registry_entry.get("base_url")
+        default_model = registry_entry["default_model"]
+    else:
+        api_style = (req.api_style or "openai").strip().lower()
+        if api_style not in ("openai", "gemini", "claude"):
+            raise HTTPException(status_code=400, detail="api_style must be 'openai', 'gemini', or 'claude' for a custom provider.")
+        base_url = req.base_url.strip() if req.base_url else None
+        if api_style == "openai" and not base_url:
+            raise HTTPException(status_code=400, detail=f"base_url is required for a custom provider like '{provider}'.")
+        default_model = None
+
+    model = req.model.strip() if req.model and req.model.strip() else (existing.get("model") or default_model)
+    if not model:
+        raise HTTPException(status_code=400, detail=f"A model name is required for provider '{provider}'.")
+
+    final_api_key = api_key if api_key else existing.get("api_key", "")
+
     cfg["ai"]["provider"] = provider
-    cfg["ai"][provider]["api_key"] = api_key
-    if req.model and req.model.strip():
-        cfg["ai"][provider]["model"] = req.model.strip()
-    elif not cfg["ai"][provider].get("model"):
-        cfg["ai"][provider]["model"] = DEFAULT_GEMINI_MODEL if provider == "gemini" else DEFAULT_CLAUDE_MODEL
+    cfg["ai"]["providers"][provider] = {
+        "api_key": final_api_key,
+        "model": model,
+        "api_style": api_style,
+        "base_url": base_url,
+    }
+    if "oauth_tokens" in existing:
+        cfg["ai"]["providers"][provider]["oauth_tokens"] = existing["oauth_tokens"]
+
     save_config(cfg)
     return {"message": f"{provider.title()} settings saved."}
+
+
+# ---------------------------------------------------------------------------
+# OAuth 2.0 Integration
+# ---------------------------------------------------------------------------
+
+class OAuthCredentialsRequest(BaseModel):
+    google_client_id: Optional[str] = None
+    google_client_secret: Optional[str] = None
+
+
+@app.get("/api/auth/config")
+def get_auth_config():
+    cfg = load_config()
+    oauth = cfg.get("oauth", {})
+    return {
+        "google_client_id": oauth.get("google_client_id", ""),
+        "has_google_secret": bool(oauth.get("google_client_secret")),
+        "is_demo_mode": not bool(oauth.get("google_client_id") and oauth.get("google_client_secret")),
+    }
+
+
+@app.post("/api/auth/config")
+def save_auth_config(req: OAuthCredentialsRequest):
+    cfg = load_config()
+    cfg.setdefault("oauth", {})
+    if req.google_client_id is not None:
+        cfg["oauth"]["google_client_id"] = req.google_client_id.strip()
+    if req.google_client_secret is not None:
+        secret = req.google_client_secret.strip()
+        if secret:
+            cfg["oauth"]["google_client_secret"] = encrypt_value(secret)
+        else:
+            cfg["oauth"]["google_client_secret"] = ""
+    save_config(cfg)
+    return {"message": "OAuth credentials saved."}
+
+
+@app.post("/api/auth/{provider}/unlink")
+def unlink_auth(provider: str):
+    cfg = load_config()
+    provider_cfg = cfg.get("ai", {}).get("providers", {}).get(provider)
+    if provider_cfg and "oauth_tokens" in provider_cfg:
+        provider_cfg.pop("oauth_tokens")
+        save_config(cfg)
+        return {"message": f"{provider.title()} account unlinked."}
+    return {"message": "No account linked."}
+
+
+@app.get("/api/auth/{provider}/login")
+def oauth_login(provider: str):
+    cfg = load_config()
+    oauth = cfg.get("oauth", {})
+    client_id = oauth.get("google_client_id")
+    client_secret = oauth.get("google_client_secret")
+
+    if provider == "gemini" and client_id and client_secret:
+        import urllib.parse
+        redirect_uri = "http://127.0.0.1:8000/api/auth/gemini/callback"
+        scopes = "https://www.googleapis.com/auth/generative-language.tuning https://www.googleapis.com/auth/cloud-platform"
+        params = {
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "response_type": "code",
+            "scope": scopes,
+            "access_type": "offline",
+            "prompt": "consent",
+        }
+        url = f"https://accounts.google.com/o/oauth2/v2/auth?{urllib.parse.urlencode(params)}"
+        return HTMLResponse(content=f'<script>window.location.href = "{url}";</script>')
+    else:
+        # Redirect to simulation page
+        return HTMLResponse(content=f'<script>window.location.href = "/mock_login.html?provider={provider}";</script>')
+
+
+@app.get("/api/auth/{provider}/callback", response_class=HTMLResponse)
+async def oauth_callback(provider: str, code: Optional[str] = None):
+    cfg = load_config()
+    oauth = cfg.get("oauth", {})
+    client_id = oauth.get("google_client_id")
+    client_secret_enc = oauth.get("google_client_secret")
+
+    access_token = ""
+    refresh_token = ""
+    expires_in = 3600
+
+    if provider == "gemini" and client_id and client_secret_enc and code and not code.startswith("mock_"):
+        client_secret = decrypt_value(client_secret_enc)
+        url = "https://oauth2.googleapis.com/token"
+        payload = {
+            "code": code,
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "redirect_uri": "http://127.0.0.1:8000/api/auth/gemini/callback",
+            "grant_type": "authorization_code",
+        }
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(url, data=payload)
+            if resp.status_code != 200:
+                return HTMLResponse(content=f"<h3>Authentication failed: {resp.text}</h3>")
+            data = resp.json()
+            access_token = data.get("access_token")
+            refresh_token = data.get("refresh_token")
+            expires_in = data.get("expires_in", 3600)
+    else:
+        # Simulation mode: generate mock tokens
+        access_token = f"mock_access_{int(time.time())}"
+        refresh_token = f"mock_refresh_{int(time.time())}"
+        expires_in = 3600
+
+    cfg["ai"].setdefault("providers", {})
+    cfg["ai"]["providers"].setdefault(provider, {})
+    cfg["ai"]["providers"][provider]["oauth_tokens"] = {
+        "access_token": encrypt_value(access_token),
+        "refresh_token": encrypt_value(refresh_token),
+        "expires_at": int(time.time()) + int(expires_in),
+    }
+    cfg["ai"]["provider"] = provider
+    save_config(cfg)
+
+    return """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Authentication Successful</title>
+        <style>
+            body {
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+                background: linear-gradient(135deg, #0f0c20 0%, #15102a 100%);
+                color: #fff;
+                display: flex;
+                justify-content: center;
+                align-items: center;
+                height: 100vh;
+                margin: 0;
+            }
+            .card {
+                background: rgba(255, 255, 255, 0.05);
+                backdrop-filter: blur(10px);
+                border: 1px solid rgba(255, 255, 255, 0.1);
+                padding: 40px;
+                border-radius: 20px;
+                text-align: center;
+                box-shadow: 0 20px 50px rgba(0,0,0,0.3);
+                max-width: 400px;
+            }
+            h1 { color: #00e5ff; margin-top: 0; font-size: 24px; }
+            p { color: #a5a1b8; font-size: 15px; line-height: 1.5; margin-bottom: 30px; }
+            button {
+                background: linear-gradient(135deg, #007bff, #00e5ff);
+                border: none;
+                color: white;
+                padding: 12px 30px;
+                font-size: 15px;
+                font-weight: 600;
+                border-radius: 30px;
+                cursor: pointer;
+                transition: all 0.3s ease;
+            }
+            button:hover {
+                transform: translateY(-2px);
+                box-shadow: 0 10px 20px rgba(0, 229, 255, 0.4);
+            }
+        </style>
+    </head>
+    <body>
+        <div class="card">
+            <h1>Account Connected!</h1>
+            <p>Your account has been linked successfully. You can now close this tab and return to the chatbot.</p>
+            <button onclick="window.close()">Close Window</button>
+        </div>
+    </body>
+    </html>
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -1318,12 +1895,12 @@ async def chat(req: ChatRequest):
     cfg = load_config()
     ai_cfg = cfg.get("ai", {})
     provider = ai_cfg.get("provider", "gemini")
-    provider_settings = ai_cfg.get(provider, {})
+    provider_settings = ai_cfg.get("providers", {}).get(provider, {})
 
-    if not provider_settings.get("api_key"):
+    if not provider_settings.get("api_key") and not provider_settings.get("oauth_tokens"):
         raise HTTPException(
             status_code=400,
-            detail=f"No {provider.title()} API key set up yet. Open AI Settings in the sidebar and add your API key first.",
+            detail=f"No {provider.title()} API key or OAuth account linked yet. Open AI Settings in the sidebar and add your API key or link your account first.",
         )
 
     check_and_increment_quota(ai_cfg.get("daily_request_limit", 20))
@@ -1331,17 +1908,22 @@ async def chat(req: ChatRequest):
     # One or more databases can be active at once (Nigah may have selected
     # just LaundryPOS, just TAILORINGDEV, or both together).
     active_profiles = get_active_profiles(cfg)
-    active = [(key, profile, FileMakerClient(profile)) for key, profile in active_profiles]
+    active = [(key, profile, get_fm_client(key, profile)) for key, profile in active_profiles]
 
-    if provider == "claude":
+    # api_style decides which wire format to speak - NOT the provider name
+    # itself. This is what makes "any provider" actually work: a brand
+    # new provider just needs an api_style, not a new branch of code here.
+    api_style = provider_settings.get("api_style") or PROVIDER_REGISTRY.get(provider, {}).get("api_style", "openai")
+
+    if api_style == "claude":
         # Anthropic Messages API: plain string content for normal turns.
         messages = []
         for msg in req.history:
             role = "assistant" if msg.role == "bot" else "user"
             messages.append({"role": role, "content": msg.text})
         messages.append({"role": "user", "content": req.message})
-        answer_text = await run_chat_loop_claude(cfg, active, messages)
-    else:
+        answer_text = await run_chat_loop_claude(cfg, active, messages, provider)
+    elif api_style == "gemini":
         # Build the conversation: prior turns (if any) + the new question.
         # This is what gives the chatbot memory across follow-up questions
         # like "show me those again but sorted by name".
@@ -1350,7 +1932,16 @@ async def chat(req: ChatRequest):
             role = "model" if msg.role == "bot" else "user"
             contents.append({"role": role, "parts": [{"text": msg.text}]})
         contents.append({"role": "user", "parts": [{"text": req.message}]})
-        answer_text = await run_chat_loop(cfg, active, contents)
+        answer_text = await run_chat_loop(cfg, active, contents, provider)
+    else:
+        # OpenAI-compatible wire format - DeepSeek, OpenAI, or any custom
+        # "anything" provider Sohaib wants to add later.
+        messages = [{"role": "system", "content": SYSTEM_INSTRUCTIONS}]
+        for msg in req.history:
+            role = "assistant" if msg.role == "bot" else "user"
+            messages.append({"role": role, "content": msg.text})
+        messages.append({"role": "user", "content": req.message})
+        answer_text = await run_chat_loop_openai(cfg, active, messages, provider)
 
     return {"type": "text", "data": answer_text}
 

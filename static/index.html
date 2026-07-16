@@ -57,17 +57,50 @@
     </div>
   </div>
 
-  <!-- ===================== AI PROVIDER SETTINGS (Gemini / Claude API key) ===================== -->
+  <!-- ===================== AI PROVIDER SETTINGS (any provider - Gemini, Claude, DeepSeek, OpenAI, or a custom one) ===================== -->
   <div id="aiSettingsModal" class="wizard-overlay hidden">
     <div class="wizard-card">
       <h2>AI Provider Settings</h2>
       <p class="hint">Choose which AI powers the chatbot and enter your own API key. The key is stored only in this app's config.json on this server.</p>
 
-      <label class="checkbox-row"><input type="radio" name="aiProvider" id="aiProviderGemini" value="gemini" checked /> Gemini</label>
-      <label class="checkbox-row"><input type="radio" name="aiProvider" id="aiProviderClaude" value="claude" /> Claude</label>
+      <select id="aiProviderSelect"></select>
 
-      <input id="aiApiKey" type="password" placeholder="API key" />
+      <div id="aiCustomFields" class="hidden">
+        <input id="aiCustomProviderName" placeholder="Provider name (e.g. groq, ollama, together)" />
+        <select id="aiApiStyle">
+          <option value="openai">OpenAI-compatible (most providers, incl. DeepSeek/Groq)</option>
+          <option value="gemini">Gemini-style</option>
+          <option value="claude">Claude-style</option>
+        </select>
+        <input id="aiBaseUrl" placeholder="Base URL (e.g. https://api.groq.com/openai/v1)" />
+      </div>
+
+      <!-- OAuth Login Section -->
+      <div id="aiOAuthBlock" class="hidden" style="margin-top: 15px; margin-bottom: 15px; text-align: center;">
+        <button id="aiOAuthBtn" class="btn-oauth" style="width: 100%; border: none; padding: 12px; border-radius: 12px; font-weight: 600; cursor: pointer; transition: all 0.2s;"></button>
+        
+        <div id="oauthLinkedBadge" class="hidden" style="background: rgba(0, 229, 255, 0.08); border: 1px solid rgba(0, 229, 255, 0.2); padding: 10px; border-radius: 12px; display: flex; align-items: center; justify-content: space-between;">
+          <span style="color: #00e5ff; font-weight: 600; font-size: 14px;">✓ Linked via OAuth</span>
+          <button id="oauthUnlinkBtn" class="btn-unlink" style="background: rgba(255, 68, 68, 0.15); border: 1px solid rgba(255, 68, 68, 0.3); color: #ff4444; padding: 6px 12px; border-radius: 8px; font-size: 12px; font-weight: 600; cursor: pointer; transition: all 0.2s;">Unlink</button>
+        </div>
+      </div>
+
+      <div id="aiApiKeyWrapper">
+        <input id="aiApiKey" type="password" placeholder="API key" />
+      </div>
       <input id="aiModel" placeholder="Model (optional — leave blank to use the current default)" />
+
+      <!-- Expandable OAuth Developer Config -->
+      <div class="expandable-section" style="margin-top: 15px; text-align: left; border-top: 1px solid rgba(255, 255, 255, 0.08); padding-top: 12px;">
+        <button id="toggleOAuthConfigBtn" class="btn-toggle-link" style="background: none; border: none; color: #a5a1b8; cursor: pointer; font-size: 13px; font-weight: 600; padding: 0; display: flex; align-items: center; gap: 4px;">⚙️ OAuth Developer Settings</button>
+        <div id="oauthConfigSection" class="hidden" style="padding-top: 10px; display: flex; flex-direction: column; gap: 8px;">
+          <p class="hint" style="margin: 0 0 4px; font-size: 11px; color: #a5a1b8; line-height: 1.4;">For real Google OAuth, input GCP credentials. Leave blank to run in simulation/demo mode.</p>
+          <input id="googleClientId" placeholder="Google Client ID" />
+          <input id="googleClientSecret" type="password" placeholder="Google Client Secret" />
+          <button id="saveOAuthConfigBtn" class="btn-secondary" style="width:100%; padding: 8px; font-size: 13px;">Save Developer Credentials</button>
+          <div id="oauthConfigStatus" class="hint" style="margin: 0; font-size: 11px; text-align: center;"></div>
+        </div>
+      </div>
 
       <div id="aiSettingsError" class="error hidden"></div>
       <p id="aiSettingsStatus" class="hint"></p>
@@ -94,7 +127,7 @@
       <button id="deleteProfileBtn" class="btn-secondary danger">Remove Selected</button>
 
       <h2 class="section-gap">AI Provider</h2>
-      <button id="aiSettingsBtn" class="btn-secondary">&#9881; Gemini / Claude Settings</button>
+      <button id="aiSettingsBtn" class="btn-secondary">&#9881; AI Provider Settings</button>
     </aside>
 
     <main class="chat-main">
